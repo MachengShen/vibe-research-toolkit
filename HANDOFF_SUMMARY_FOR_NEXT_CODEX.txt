@@ -4,3 +4,4 @@
 [2026-02-15T14:19:34+08:00] owner=codex major_action: created reusable repo packaging OpenClaw+proxy+Discord and Codex Discord relay
 [2026-02-15T14:19:34+08:00] major_action: added bootstrap.sh + scripts for install/config/cron
 [2026-02-15T14:19:34+08:00] major_action: added portable watchdog scripts under system/ (support override env vars)
+[2026-02-15T14:24:02+08:00] owner=codex major_action: expanded README with one-shot bootstrap runbook + security notes

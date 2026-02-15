@@ -1,0 +1,16 @@
+# Secrets
+config/setup.env
+config/*.env
+*.env
+
+# Runtime state
+*.log
+.tmp
+.DS_Store
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS/package locks from installers
+*.pid

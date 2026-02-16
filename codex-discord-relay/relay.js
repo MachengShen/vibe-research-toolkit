@@ -83,6 +83,25 @@ function boolEnv(name, fallback) {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
+function intEnv(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.floor(n);
+}
+
+const ALLOWED_GUILDS = parseCsv(process.env.DISCORD_ALLOWED_GUILDS || "");
+const ALLOWED_CHANNELS = parseCsv(process.env.DISCORD_ALLOWED_CHANNELS || "");
+
+const RELAY_STATE_DIR = path.resolve(process.env.RELAY_STATE_DIR || "/root/.codex-discord-relay");
+const RELAY_STATE_FILE = path.resolve(
+  process.env.RELAY_STATE_FILE || path.join(RELAY_STATE_DIR, "sessions.json")
+);
+const RELAY_UPLOAD_ROOT_DIR = path.resolve(
+  process.env.RELAY_UPLOAD_ROOT_DIR || path.join(RELAY_STATE_DIR, "uploads")
+);
+
 const CONFIG = {
   token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
   codexBin: (process.env.CODEX_BIN || "codex").trim(),
@@ -104,20 +123,34 @@ const CONFIG = {
     .split(";")
     .map((s) => s.trim())
     .filter(Boolean),
-  stateDir: path.resolve(process.env.RELAY_STATE_DIR || "/root/.codex-discord-relay"),
-  stateFile: path.resolve(
-    process.env.RELAY_STATE_FILE || "/root/.codex-discord-relay/sessions.json"
-  ),
+  stateDir: RELAY_STATE_DIR,
+  stateFile: RELAY_STATE_FILE,
   maxReplyChars: Number(process.env.RELAY_MAX_REPLY_CHARS || 1800),
   allowAttachInGuilds: boolEnv("RELAY_ATTACH_ALLOW_GUILDS", false),
-  allowedGuilds: parseCsv(process.env.DISCORD_ALLOWED_GUILDS || ""),
-  allowedChannels: parseCsv(process.env.DISCORD_ALLOWED_CHANNELS || ""),
+  allowedGuilds: ALLOWED_GUILDS,
+  allowedChannels: ALLOWED_CHANNELS,
+  // In threads, it's usually a 1:1 working context. Default to auto-responding there when
+  // the relay is already restricted via DISCORD_ALLOWED_CHANNELS; otherwise keep mention-gating.
+  threadAutoRespond: boolEnv("RELAY_THREAD_AUTO_RESPOND", ALLOWED_CHANNELS.size > 0),
+
+  uploadEnabled: boolEnv("RELAY_UPLOAD_ENABLED", true),
+  uploadRootDir: RELAY_UPLOAD_ROOT_DIR,
+  uploadAllowOutsideConversation: boolEnv("RELAY_UPLOAD_ALLOW_OUTSIDE_CONVERSATION", false),
+  uploadAllowedRoots: (() => {
+    const raw = process.env.RELAY_UPLOAD_ALLOWED_ROOTS;
+    const roots = raw == null || raw.trim() === "" ? new Set([RELAY_UPLOAD_ROOT_DIR]) : parseCsv(raw);
+    return Array.from(roots).map((root) => path.resolve(root));
+  })(),
+  uploadMaxFiles: Math.max(0, intEnv("RELAY_UPLOAD_MAX_FILES", 3)),
+  uploadMaxBytes: Math.max(0, intEnv("RELAY_UPLOAD_MAX_BYTES", 8 * 1024 * 1024)),
 };
 
 if (!CONFIG.token) {
   console.error("DISCORD_BOT_TOKEN is required.");
   process.exit(1);
 }
+
+if (!process.env.RELAY_UPLOAD_ROOT_DIR) process.env.RELAY_UPLOAD_ROOT_DIR = CONFIG.uploadRootDir;
 
 const state = {
   version: 1,
@@ -135,8 +168,132 @@ function isAllowedWorkdir(workdir) {
   return CONFIG.allowedWorkdirRoots.some((root) => isSubPath(root, workdir));
 }
 
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+
+function safeUploadDirName(key) {
+  return String(key || "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 180) || "unknown";
+}
+
+function getConversationUploadDir(conversationKey) {
+  return path.join(CONFIG.uploadRootDir, safeUploadDirName(conversationKey));
+}
+
+function normalizeUploadRawPath(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+  if (
+    (s.startsWith("'") && s.endsWith("'")) ||
+    (s.startsWith('"') && s.endsWith('"'))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/^file:\/\//i, "");
+  s = s.replace(/^file:/i, "");
+  return s.trim();
+}
+
+function resolveUploadPath(rawPath, baseDir) {
+  const cleaned = normalizeUploadRawPath(rawPath);
+  if (!cleaned) return null;
+  if (path.isAbsolute(cleaned)) return path.resolve(cleaned);
+  return path.resolve(baseDir, cleaned);
+}
+
+function isAllowedUploadPath(resolvedPath, conversationUploadDir) {
+  if (CONFIG.uploadAllowOutsideConversation) {
+    return CONFIG.uploadAllowedRoots.some((root) => isSubPath(root, resolvedPath));
+  }
+  return isSubPath(conversationUploadDir, resolvedPath);
+}
+
+function isImagePath(filePath) {
+  const ext = path.extname(String(filePath || "")).toLowerCase();
+  return IMAGE_EXTS.has(ext);
+}
+
+function extractUploadMarkers(text) {
+  const re = /\[\[upload:([^\]]+)\]\]/gi;
+  const rawText = String(text || "");
+  let out = "";
+  let last = 0;
+  const rawPaths = [];
+  let m;
+  while ((m = re.exec(rawText)) !== null) {
+    out += rawText.slice(last, m.index);
+    const raw = normalizeUploadRawPath(m[1] || "");
+    if (raw) {
+      rawPaths.push(raw);
+      out += `[uploaded:${path.basename(raw)}]`;
+    } else {
+      out += m[0];
+    }
+    last = re.lastIndex;
+  }
+  out += rawText.slice(last);
+  return { text: out, rawPaths };
+}
+
+async function resolveAndValidateUploads(conversationKey, rawPaths) {
+  const conversationDir = getConversationUploadDir(conversationKey);
+  await fsp.mkdir(conversationDir, { recursive: true });
+
+  const files = [];
+  const errors = [];
+  const seen = new Set();
+
+  const maxFiles = Math.max(0, CONFIG.uploadMaxFiles);
+  const maxBytes = Math.max(0, CONFIG.uploadMaxBytes);
+
+  for (const raw of rawPaths || []) {
+    if (maxFiles > 0 && files.length >= maxFiles) break;
+    const resolved = resolveUploadPath(raw, conversationDir);
+    if (!resolved) continue;
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+
+    if (!isAllowedUploadPath(resolved, conversationDir)) {
+      errors.push(`Upload blocked (path not allowed): \`${path.basename(resolved)}\``);
+      continue;
+    }
+    if (!isImagePath(resolved)) {
+      errors.push(`Upload blocked (not an image type): \`${path.basename(resolved)}\``);
+      continue;
+    }
+
+    let st;
+    try {
+      st = await fsp.stat(resolved);
+    } catch {
+      errors.push(`Upload missing: \`${path.basename(resolved)}\``);
+      continue;
+    }
+    if (!st.isFile()) {
+      errors.push(`Upload is not a file: \`${path.basename(resolved)}\``);
+      continue;
+    }
+    if (maxBytes > 0 && st.size > maxBytes) {
+      errors.push(`Upload too large (${st.size} bytes): \`${path.basename(resolved)}\``);
+      continue;
+    }
+
+    files.push({ attachment: resolved, name: path.basename(resolved) });
+  }
+
+  if (maxFiles > 0 && (rawPaths || []).length > maxFiles) {
+    errors.push(`Upload limit: max ${maxFiles} file(s).`);
+  }
+
+  return { conversationDir, files, errors };
+}
+
 async function ensureStateLoaded() {
   await fsp.mkdir(CONFIG.stateDir, { recursive: true });
+  if (CONFIG.uploadEnabled) {
+    await fsp.mkdir(CONFIG.uploadRootDir, { recursive: true });
+  }
   try {
     const raw = await fsp.readFile(CONFIG.stateFile, "utf8");
     const parsed = JSON.parse(raw);
@@ -208,7 +365,7 @@ function extractPrompt(message, botUserId) {
 }
 
 function parseCommand(prompt) {
-  const match = prompt.match(/^\/(help|status|reset|workdir|attach)\b(?:\s+([\s\S]+))?$/i);
+  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload)\b(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
   return {
     name: match[1].toLowerCase(),
@@ -240,11 +397,13 @@ function buildCodexArgs(session, prompt) {
   return args;
 }
 
-async function runCodex(session, prompt) {
+async function runCodex(session, prompt, extraEnv) {
   const args = buildCodexArgs(session, prompt);
+  const env =
+    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
   const child = spawn(CONFIG.codexBin, args, {
     cwd: session.workdir || CONFIG.defaultWorkdir,
-    env: process.env,
+    env,
   });
 
   let threadId = session.threadId || null;
@@ -319,7 +478,7 @@ async function sendLongReply(baseMessage, text) {
   }
 }
 
-async function handleCommand(message, session, command) {
+async function handleCommand(message, session, command, conversationKey) {
   if (command.name === "help") {
     await message.reply(
       [
@@ -328,16 +487,20 @@ async function handleCommand(message, session, command) {
         "`/reset` - reset Codex conversation for this Discord context",
         "`/workdir <absolute_path>` - set workdir (resets thread)",
         "`/attach <thread_id>` - attach this Discord context to an existing Codex session (DM-only by default)",
+        "`/upload <path>` - upload an image from this conversation's upload directory",
       ].join("\n")
     );
     return true;
   }
 
   if (command.name === "status") {
+    const key = conversationKey || getConversationKey(message);
+    const uploadDir = getConversationUploadDir(key);
     await message.reply(
       [
         `thread_id: ${session.threadId || "none"}`,
         `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
+        `upload_dir: ${uploadDir}`,
       ].join("\n")
     );
     return true;
@@ -406,6 +569,31 @@ async function handleCommand(message, session, command) {
     return true;
   }
 
+  if (command.name === "upload") {
+    if (!CONFIG.uploadEnabled) {
+      await message.reply("Uploads are disabled on this relay.");
+      return true;
+    }
+    if (!command.arg) {
+      await message.reply("Usage: `/upload <path>` (relative to this conversation's upload_dir, or absolute within it)");
+      return true;
+    }
+    const key = conversationKey || getConversationKey(message);
+    const { conversationDir, files, errors } = await resolveAndValidateUploads(key, [command.arg]);
+    if (files.length === 0) {
+      const detail = errors.length > 0 ? `\n${errors.map((e) => `- ${e}`).join("\n")}` : "";
+      await message.reply(`No valid image to upload.\nupload_dir: \`${conversationDir}\`${detail}`);
+      return true;
+    }
+
+    const names = files.map((f) => `\`${f.name}\``).join(", ");
+    await message.reply({ content: `Uploaded: ${names}`, files });
+    if (errors.length > 0) {
+      await message.channel.send(`Upload notes:\n${errors.map((e) => `- ${e}`).join("\n")}`);
+    }
+    return true;
+  }
+
   return false;
 }
 
@@ -430,22 +618,39 @@ async function main() {
     try {
       if (message.author.bot) return;
       const isDm = !message.guildId;
+      const isThread = Boolean(message.channel && message.channel.isThread && message.channel.isThread());
+      const threadParentId = isThread && message.channel && typeof message.channel.parentId === "string" ? message.channel.parentId : null;
 
       if (!isDm && CONFIG.allowedGuilds.size > 0 && !CONFIG.allowedGuilds.has(message.guildId)) {
         return;
       }
-      // Channel allowlist is intended for guild channels; DMs have dynamic channel ids.
-      if (!isDm && CONFIG.allowedChannels.size > 0 && !CONFIG.allowedChannels.has(message.channelId)) return;
+      // Channel allowlist is intended for guild channels. Threads have their own ids, so
+      // allow threads under an allowed parent channel as well.
+      if (!isDm && CONFIG.allowedChannels.size > 0) {
+        const allowed =
+          CONFIG.allowedChannels.has(message.channelId) ||
+          (threadParentId && CONFIG.allowedChannels.has(threadParentId));
+        if (!allowed) return;
+      }
 
       if (!isDm) {
         const mentioned = message.mentions.has(client.user.id);
-        if (!mentioned) return;
+        if (!mentioned && !(isThread && CONFIG.threadAutoRespond)) return;
       }
 
       const prompt = extractPrompt(message, client.user.id);
       if (!prompt) {
-        await message.reply("Send a prompt after mentioning me, or use `/help`.");
+        await message.reply(
+          isDm || (isThread && CONFIG.threadAutoRespond)
+            ? "Send a prompt, or use `/help`."
+            : "Send a prompt after mentioning me, or use `/help`."
+        );
         return;
+      }
+
+      // Make sure the bot is joined to threads before trying to type/reply.
+      if (!isDm && isThread && message.channel && typeof message.channel.join === "function" && message.channel.joinable) {
+        message.channel.join().catch(() => {});
       }
 
       const key = getConversationKey(message);
@@ -453,7 +658,7 @@ async function main() {
 
       const command = parseCommand(prompt);
       if (command) {
-        await enqueueConversation(key, async () => handleCommand(message, session, command));
+        await enqueueConversation(key, async () => handleCommand(message, session, command, key));
         return;
       }
 
@@ -461,16 +666,45 @@ async function main() {
       await enqueueConversation(key, async () => {
         try {
           await message.channel.sendTyping();
-          const result = await runCodex(session, prompt);
+          const uploadDir = getConversationUploadDir(key);
+          if (CONFIG.uploadEnabled) {
+            await fsp.mkdir(uploadDir, { recursive: true });
+          }
+          const result = await runCodex(
+            session,
+            prompt,
+            CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
+          );
           session.threadId = result.threadId || session.threadId;
           session.updatedAt = new Date().toISOString();
           await queueSaveState();
 
-          const answer = result.text || "No response.";
+          let answer = result.text || "No response.";
+          let uploadPaths = [];
+          if (CONFIG.uploadEnabled) {
+            const parsed = extractUploadMarkers(answer);
+            answer = parsed.text;
+            uploadPaths = parsed.rawPaths || [];
+          }
+
           const chunks = splitMessage(answer, Math.max(300, CONFIG.maxReplyChars));
           await pendingMsg.edit(chunks[0]);
           for (let i = 1; i < chunks.length; i += 1) {
             await message.channel.send(chunks[i]);
+          }
+
+          if (CONFIG.uploadEnabled && uploadPaths.length > 0) {
+            const { files, errors } = await resolveAndValidateUploads(key, uploadPaths);
+            if (files.length > 0) {
+              for (let i = 0; i < files.length; i += 10) {
+                const batch = files.slice(i, i + 10);
+                const names = batch.map((f) => `\`${f.name}\``).join(", ");
+                await message.channel.send({ content: `Uploaded: ${names}`, files: batch });
+              }
+            }
+            if (errors.length > 0) {
+              await message.channel.send(`Upload notes:\n${errors.map((e) => `- ${e}`).join("\n")}`);
+            }
           }
         } catch (err) {
           const detail = String(err.message || err).slice(0, 1800);

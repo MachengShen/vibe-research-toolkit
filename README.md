@@ -39,11 +39,24 @@ sudo ./bootstrap.sh
 
 ## What gets installed
 
+Bootstrap installs:
+
 - `/usr/local/bin/openclaw-gateway-ensure.sh`
 - `/usr/local/bin/codex-discord-relay-ensure.sh`
 - `/usr/local/bin/codex-discord-relayctl`
-- Cron entries to keep both services alive (`@reboot` + periodic ensure)
-- Proxy env at `/root/.openclaw/proxy.env` (or `$OPENCLAW_STATE_DIR/proxy.env`) sourced by both ensure scripts
+- `/usr/local/bin/codex-discord-relay-ensure-multi.sh`
+- `/usr/local/bin/codex-discord-relay-multictl`
+- `/usr/local/bin/openclaw-kit-autoupdate.sh`
+- `/etc/systemd/system/openclaw-kit-autoupdate.service`
+- `/etc/systemd/system/openclaw-kit-autoupdate.timer`
+- Cron entries for gateway + relay ensure scripts (`@reboot` + periodic ensure)
+- Proxy env at `/root/.openclaw/proxy.env` (or `$OPENCLAW_STATE_DIR/proxy.env`) sourced by ensure scripts and autoupdate script
+
+Relay multi-instance state layout:
+
+- Default relay state: `/root/.codex-discord-relay`
+- Extra instance env files: `/root/.codex-discord-relay/instances.d/<name>.env`
+- Extra instance state dirs: `/root/.codex-discord-relay/instances/<name>/`
 
 ## How It Works (Discord)
 
@@ -63,7 +76,53 @@ openclaw gateway health
 openclaw status
 codex-discord-relayctl status
 codex-discord-relayctl logs
+
+codex-discord-relay-multictl list
+codex-discord-relay-multictl logs default
+
+# Auto-update service
+systemctl status openclaw-kit-autoupdate.timer --no-pager
+systemctl list-timers --all | rg openclaw-kit-autoupdate
+tail -n 120 /var/log/openclaw-kit-autoupdate.log
+
+# If systemd is unavailable (container/minimal init), fallback cron is used:
+cat /etc/cron.d/openclaw-kit-autoupdate
 ```
+
+## Auto-Update Config
+
+Set these in `config/setup.env` before bootstrap:
+
+- `OPENCLAW_KIT_AUTOUPDATE_ENABLED=true|false`
+- `OPENCLAW_KIT_AUTOUPDATE_CALENDAR` (default `daily`, supports systemd `OnCalendar` syntax)
+- `OPENCLAW_KIT_AUTOUPDATE_RANDOMIZED_DELAY` (default `30m`)
+- `OPENCLAW_KIT_AUTOUPDATE_PERSISTENT` (default `true`)
+- `OPENCLAW_KIT_AUTOUPDATE_CRON` (fallback cron schedule, used only when systemd is unavailable; default `17 3 * * *`)
+
+Example cadences:
+
+- Daily: `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=daily`
+- Every 3 days (03:00): `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=*-*-1,4,7,10,13,16,19,22,25,28 03:00:00`
+
+## Relay Stall Triage (Quick)
+
+```bash
+# relay process + instance status
+codex-discord-relay-multictl list
+pgrep -af "codex-discord-relay/relay.js" || true
+
+# look for long-running/hung codex child jobs
+pgrep -af "codex .*exec" || true
+
+# inspect logs
+tail -n 200 /root/.codex-discord-relay/relay.log
+```
+
+Common signals:
+
+- `ETIMEDOUT ...:443` -> proxy/network path issue (check `/root/.openclaw/proxy.env`).
+- `Cannot find module 'node:fs'` or `node:fs/promises` -> old Node runtime was used.
+- `Working...` message stops updating while a `codex exec` process is still alive -> queue is blocked by a hung run; restart relay from SSH.
 
 ## Notes
 

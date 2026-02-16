@@ -28,10 +28,17 @@ fi
 # Codex relay (required for vibe coding via Discord)
 "$ROOT_DIR/scripts/install_codex_discord_relay.sh"
 
+# Periodic self-update service for this toolkit
+"$ROOT_DIR/scripts/install_openclaw_kit_autoupdate.sh"
+
 # Cron + start
 "$ROOT_DIR/scripts/install_cron.sh"
 /usr/local/bin/openclaw-gateway-ensure.sh || true
-/usr/local/bin/codex-discord-relay-ensure.sh || true
+if [[ -x /usr/local/bin/codex-discord-relay-ensure-multi.sh ]]; then
+  /usr/local/bin/codex-discord-relay-ensure-multi.sh || true
+else
+  /usr/local/bin/codex-discord-relay-ensure.sh || true
+fi
 
 "$ROOT_DIR/scripts/healthcheck.sh" || true
 

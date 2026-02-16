@@ -5,3 +5,50 @@
 [2026-02-15T14:19:34+08:00] major_action: added bootstrap.sh + scripts for install/config/cron
 [2026-02-15T14:19:34+08:00] major_action: added portable watchdog scripts under system/ (support override env vars)
 [2026-02-15T14:24:02+08:00] owner=codex major_action: expanded README with one-shot bootstrap runbook + security notes
+[2026-02-16T13:30:17+08:00] (codex) Task start: audit toolkit docs in /root/openclaw-codex-discord-kit against current live deployment (/usr/local/bin + /root/codex-discord-relay) and update documentation. Run/log paths to inspect: /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json, /root/.codex-discord-relay/instances/*/relay.log.
+[2026-02-16T13:32:16+08:00] (codex) Major action: audited live deployment vs repo docs.
+- Audited scripts: /usr/local/bin/codex-discord-relay-ensure.sh, /usr/local/bin/codex-discord-relay-ensure-multi.sh, /usr/local/bin/codex-discord-relayctl, /usr/local/bin/codex-discord-relay-multictl, /usr/local/bin/openclaw-gateway-ensure.sh
+- Audited runtime paths/logs: /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json, /root/.codex-discord-relay/instances.d/alpha.env.example
+- Observed cron points to ensure-multi: @reboot + */1 * * * * /usr/local/bin/codex-discord-relay-ensure-multi.sh
+[2026-02-16T13:32:32+08:00] (codex) Major action: documentation updated to match current deployment behavior and troubleshooting.
+- Updated: /root/openclaw-codex-discord-kit/README.md
+- Updated: /root/openclaw-codex-discord-kit/codex-discord-relay/README.md
+- Added explicit docs for single-instance vs multi-instance operations, state paths, progress reporting env vars, and relay stall triage.
+[2026-02-16T13:32:32+08:00] (codex) Task end: doc refresh complete.
+Current run state:
+- Relay process observed active: /root/codex-discord-relay/relay.js (default instance)
+- Cron observed using multi ensure: /usr/local/bin/codex-discord-relay-ensure-multi.sh
+- Runtime logs/state paths referenced in docs: /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json, /root/.codex-discord-relay/instances/*/relay.log
+Next steps:
+- Optional: port multi-instance scripts into toolkit installer scripts so fresh bootstrap installs match live operations.
+[2026-02-16T13:33:48+08:00] (codex) Task start: design proposal only (no file edits) for periodic toolkit update automation + reusable skill for periodic mechanistic services.
+[2026-02-16T13:37:08+08:00] (codex) Task end (design phase): prepared recommended architecture: systemd timer-based auto-update pipeline (proxy-aware, ff-only pull, deploy + verify, logging/lock) and reusable skill scaffold for generic periodic mechanistic jobs. Awaiting user approval before implementation.
+[2026-02-16T13:41:39+08:00] (codex) Task start: implement periodic auto-update service (daily) and align toolkit installer with live multi-instance relay operations. Objective includes adding reusable skill for periodic mechanistic services.
+[2026-02-16T13:47:30+08:00] (codex) Major action: implemented toolkit-side automation + deployment alignment.
+- Added installer: /root/openclaw-codex-discord-kit/scripts/install_openclaw_kit_autoupdate.sh
+- Added updater runner: /root/openclaw-codex-discord-kit/system/openclaw-kit-autoupdate.sh
+- Added unit templates: /root/openclaw-codex-discord-kit/system/openclaw-kit-autoupdate.service + .timer
+- Added multi relay wrappers to repo: /root/openclaw-codex-discord-kit/system/codex-discord-relay-ensure-multi.sh and codex-discord-relay-multictl
+- Updated bootstrap/install scripts to deploy multi wrappers and auto-update installer.
+- Updated config/docs for auto-update controls and fallback behavior.
+
+[2026-02-16T13:47:30+08:00] (codex) Major action: deployed changes on this host.
+- Installed: /usr/local/bin/openclaw-kit-autoupdate.sh, /usr/local/bin/codex-discord-relay-ensure-multi.sh, /usr/local/bin/codex-discord-relay-multictl
+- Since systemd is unavailable in this environment, installer activated cron fallback:
+  /etc/cron.d/openclaw-kit-autoupdate -> `17 3 * * * root /usr/local/bin/openclaw-kit-autoupdate.sh`
+- Manual test run executed: /usr/local/bin/openclaw-kit-autoupdate.sh
+  result: skipped update due to dirty repo safety check.
+- Run/log paths: /var/log/openclaw-kit-autoupdate.log, /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json.
+[2026-02-16T13:47:30+08:00] (codex) Task end: implementation complete.
+Current run state:
+- Relay watchdog cron active: @reboot + */1 ensure-multi
+- Auto-update scheduler active via cron fallback (systemd unavailable): /etc/cron.d/openclaw-kit-autoupdate
+Next steps:
+- Optional: install/enable systemd init on host to use timer unit directly instead of cron fallback.
+- Optional: commit toolkit repo changes and keep repo clean so auto-update can fast-forward pull.
+[2026-02-16T13:47:55+08:00] (codex) Failure+fix: install_codex_discord_relay.sh initially failed (`rsync: command not found`). Added fallback copy path (remove app files except node_modules, then `cp -a`) so deployment works on minimal hosts without rsync.
+[2026-02-16T13:48:58+08:00] (codex) Verification: all updated scripts pass `bash -n` syntax checks.
+- Re-ran auto-update installer; confirmed fallback cron config persisted:
+  /etc/cron.d/openclaw-kit-autoupdate => `17 3 * * * root /usr/local/bin/openclaw-kit-autoupdate.sh`
+- Relay run state check: `/usr/local/bin/codex-discord-relay-multictl list` reports default instance running.
+[2026-02-16T13:56:41+08:00] (codex) Task start: user requested commit of current toolkit changes so repo is clean for future auto-update runs (ff-only). Objective: validate, stage relevant files, create commit on main.

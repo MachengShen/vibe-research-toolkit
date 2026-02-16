@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic OpenClaw toolkit auto-update
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

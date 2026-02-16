@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_ENV_FILE="${CODEX_RELAY_ENV_FILE:-/root/.codex-discord-relay.env}"
+DEFAULT_STATE_DIR="${CODEX_RELAY_STATE_DIR:-/root/.codex-discord-relay}"
+INSTANCES_ENV_DIR="${CODEX_RELAY_INSTANCES_ENV_DIR:-$DEFAULT_STATE_DIR/instances.d}"
+INSTANCES_STATE_ROOT="${CODEX_RELAY_INSTANCES_STATE_ROOT:-$DEFAULT_STATE_DIR/instances}"
+
+ENSURE="/usr/local/bin/codex-discord-relay-ensure-multi.sh"
+
+usage() {
+  cat <<USAGE
+Usage: codex-discord-relay-multictl <command> [args]
+
+Commands:
+  list                           List instances (default)
+  status [name|all]              Status of one instance (or all)
+  start [name|all]               Start/ensure one instance (or all)
+  stop [name|all]                Stop one instance (or all)
+  restart [name|all]             Restart one instance (or all)
+  logs <name>                    Tail logs for an instance
+
+Instances:
+  - default: $DEFAULT_ENV_FILE (state: $DEFAULT_STATE_DIR)
+  - extra:   $INSTANCES_ENV_DIR/<name>.env (state: $INSTANCES_STATE_ROOT/<name>)
+USAGE
+}
+
+instances() {
+  # Print instance names, one per line.
+  if [[ -f "$DEFAULT_ENV_FILE" ]]; then
+    echo "default"
+  fi
+  if [[ -d "$INSTANCES_ENV_DIR" ]]; then
+    shopt -s nullglob
+    for f in "$INSTANCES_ENV_DIR"/*.env; do
+      b="$(basename "$f")"
+      echo "${b%.env}"
+    done
+    shopt -u nullglob
+  fi
+}
+
+env_file_for() {
+  local name="$1"
+  if [[ "$name" == "default" ]]; then
+    echo "$DEFAULT_ENV_FILE"
+  else
+    echo "$INSTANCES_ENV_DIR/$name.env"
+  fi
+}
+
+state_dir_for() {
+  local name="$1"
+  if [[ "$name" == "default" ]]; then
+    echo "$DEFAULT_STATE_DIR"
+  else
+    echo "$INSTANCES_STATE_ROOT/$name"
+  fi
+}
+
+running_pid_for() {
+  local name="$1"
+  local state_dir pid_file pid
+  state_dir="$(state_dir_for "$name")"
+  pid_file="$state_dir/relay.pid"
+
+  if [[ -f "$pid_file" ]]; then
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"
+      return 0
+    fi
+  fi
+
+  # Best-effort: only safe if processes were started with --instance.
+  pid="$(pgrep -f "node .*codex-discord-relay/relay.js --instance ${name}" | head -n1 || true)"
+  if [[ -n "$pid" ]]; then
+    echo "$pid"
+    return 0
+  fi
+  return 1
+}
+
+cmd="${1:-list}"
+arg="${2:-all}"
+
+if [[ "${CODEX_DISCORD_RELAY:-}" == "1" || "${CODEX_DISCORD_RELAY_CHILD:-}" == "1" ]]; then
+  case "$cmd" in
+    stop|restart)
+      echo "Refusing to '$cmd' codex-discord-relay instances from inside a relay-managed Codex run." >&2
+      echo "Run this from SSH directly instead." >&2
+      exit 3
+      ;;
+  esac
+fi
+
+case "$cmd" in
+  list)
+    printf '%-12s %-8s %-7s %s\n' "instance" "pid" "status" "state_dir"
+    while IFS= read -r name; do
+      state_dir="$(state_dir_for "$name")"
+      if pid="$(running_pid_for "$name" 2>/dev/null)"; then
+        printf '%-12s %-8s %-7s %s\n' "$name" "$pid" "running" "$state_dir"
+      else
+        printf '%-12s %-8s %-7s %s\n' "$name" "-" "stopped" "$state_dir"
+      fi
+    done < <(instances)
+    ;;
+
+  status)
+    if [[ "$arg" == "all" || -z "$arg" ]]; then
+      "$0" list
+      exit 0
+    fi
+    if pid="$(running_pid_for "$arg" 2>/dev/null)"; then
+      echo "relay[$arg] running pid=$pid"
+    else
+      echo "relay[$arg] not running"
+      exit 1
+    fi
+    ;;
+
+  start)
+    if [[ ! -x "$ENSURE" ]]; then
+      echo "missing ensure script: $ENSURE" >&2
+      exit 1
+    fi
+    if [[ "$arg" == "all" || -z "$arg" ]]; then
+      "$ENSURE"
+    else
+      "$ENSURE" "$arg"
+    fi
+    "$0" status "${arg:-all}" || true
+    ;;
+
+  stop)
+    stop_one() {
+      local name="$1"
+      local state_dir pid_file pid
+      state_dir="$(state_dir_for "$name")"
+      pid_file="$state_dir/relay.pid"
+      pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" || true
+        rm -f "$pid_file" 2>/dev/null || true
+        echo "relay[$name] stopped"
+      else
+        echo "relay[$name] not running"
+      fi
+    }
+    if [[ "$arg" == "all" || -z "$arg" ]]; then
+      while IFS= read -r name; do stop_one "$name"; done < <(instances)
+    else
+      stop_one "$arg"
+    fi
+    ;;
+
+  restart)
+    if [[ "$arg" == "all" || -z "$arg" ]]; then
+      "$0" stop all || true
+      "$0" start all
+    else
+      "$0" stop "$arg" || true
+      "$0" start "$arg"
+    fi
+    ;;
+
+  logs)
+    if [[ -z "${2:-}" ]]; then
+      echo "logs requires an instance name" >&2
+      exit 2
+    fi
+    name="$2"
+    log_file="$(state_dir_for "$name")/relay.log"
+    if [[ ! -f "$log_file" ]]; then
+      echo "missing log: $log_file" >&2
+      exit 1
+    fi
+    tail -n 80 "$log_file"
+    ;;
+
+  -h|--help|help)
+    usage
+    ;;
+
+  *)
+    usage
+    exit 2
+    ;;
+esac
+

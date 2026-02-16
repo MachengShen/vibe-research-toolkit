@@ -14,7 +14,13 @@ ENV_FILE="${CODEX_RELAY_ENV_FILE:-/root/.codex-discord-relay.env}"
 mkdir -p "$APP_DIR" "$STATE_DIR"
 
 log "installing relay app into $APP_DIR"
-rsync -a --delete "$ROOT_DIR/codex-discord-relay/" "$APP_DIR/"
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --delete "$ROOT_DIR/codex-discord-relay/" "$APP_DIR/"
+else
+  log "rsync not found; using cp fallback (preserves $APP_DIR/node_modules)"
+  find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
+  cp -a "$ROOT_DIR/codex-discord-relay/." "$APP_DIR/"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   log "creating env file template at $ENV_FILE"
@@ -40,5 +46,7 @@ fi
 
 install -m 755 "$ROOT_DIR/system/codex-discord-relay-ensure.sh" /usr/local/bin/codex-discord-relay-ensure.sh
 install -m 755 "$ROOT_DIR/system/codex-discord-relayctl" /usr/local/bin/codex-discord-relayctl
+install -m 755 "$ROOT_DIR/system/codex-discord-relay-ensure-multi.sh" /usr/local/bin/codex-discord-relay-ensure-multi.sh
+install -m 755 "$ROOT_DIR/system/codex-discord-relay-multictl" /usr/local/bin/codex-discord-relay-multictl
 
-log "installed /usr/local/bin/codex-discord-relay-ensure.sh and codex-discord-relayctl"
+log "installed relay scripts: codex-discord-relay-ensure.sh, codex-discord-relayctl, codex-discord-relay-ensure-multi.sh, codex-discord-relay-multictl"

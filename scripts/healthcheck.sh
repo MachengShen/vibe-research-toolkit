@@ -10,4 +10,8 @@ openclaw gateway health 2>/dev/null || true
 openclaw health 2>/dev/null || true
 
 log "codex relay:"
-/usr/local/bin/codex-discord-relayctl status 2>/dev/null || true
+if [[ -x /usr/local/bin/codex-discord-relay-multictl ]]; then
+  /usr/local/bin/codex-discord-relay-multictl status all 2>/dev/null || true
+else
+  /usr/local/bin/codex-discord-relayctl status 2>/dev/null || true
+fi

@@ -88,3 +88,10 @@ Next steps:
 
 [2026-02-16T14:13:00+08:00] (codex) Major action: improved autoupdate fallback for non-systemd hosts.
 - /etc/cron.d/openclaw-kit-autoupdate now includes explicit env vars for repo/proxy/log path, so renamed/relocated repo paths continue to work.
+[2026-02-16T14:13:30+08:00] (codex) Task end: packaged-skills + repo rename complete.
+- Commit pushed: a702426 (Bundle custom skills and add one-command skills installer)
+- GitHub repo canonical name now: MachengShen/openclaw-codex-discord-skills-kit
+- Local origin URL updated to new repo URL.
+- Auto-update validation log path: /var/log/openclaw-kit-autoupdate.log
+- Runtime relay paths referenced/validated: /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json
+- Scheduler state on this host: /etc/cron.d/openclaw-kit-autoupdate (systemd unavailable), plus user crontab ensure-multi watchdog entries.

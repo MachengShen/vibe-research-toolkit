@@ -91,6 +91,11 @@ function intEnv(name, fallback) {
   return Math.floor(n);
 }
 
+function normalizeAgentProvider(value) {
+  const v = String(value || "codex").trim().toLowerCase();
+  return v === "claude" ? "claude" : "codex";
+}
+
 const ALLOWED_GUILDS = parseCsv(process.env.DISCORD_ALLOWED_GUILDS || "");
 const ALLOWED_CHANNELS = parseCsv(process.env.DISCORD_ALLOWED_CHANNELS || "");
 
@@ -104,13 +109,18 @@ const RELAY_UPLOAD_ROOT_DIR = path.resolve(
 
 const CONFIG = {
   token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
+  agentProvider: normalizeAgentProvider(process.env.RELAY_AGENT_PROVIDER || process.env.AGENT_PROVIDER),
   codexBin: (process.env.CODEX_BIN || "codex").trim(),
+  claudeBin: (process.env.CLAUDE_BIN || "claude").trim(),
   defaultWorkdir: path.resolve(process.env.CODEX_WORKDIR || "/root"),
   allowedWorkdirRoots: (() => {
     const roots = parseCsv(process.env.CODEX_ALLOWED_WORKDIR_ROOTS || "/root");
     return Array.from(roots).map((root) => path.resolve(root));
   })(),
   model: (process.env.CODEX_MODEL || "").trim(),
+  claudeModel: (process.env.CLAUDE_MODEL || process.env.CODEX_MODEL || "").trim(),
+  claudePermissionMode: (process.env.CLAUDE_PERMISSION_MODE || "").trim(),
+  agentTimeoutMs: Math.max(0, intEnv("RELAY_AGENT_TIMEOUT_MS", 10 * 60 * 1000)),
   sandbox: (process.env.CODEX_SANDBOX || "workspace-write").trim(),
   approvalPolicy: (
     process.env.CODEX_APPROVAL_POLICY ||
@@ -144,6 +154,9 @@ const CONFIG = {
   uploadMaxFiles: Math.max(0, intEnv("RELAY_UPLOAD_MAX_FILES", 3)),
   uploadMaxBytes: Math.max(0, intEnv("RELAY_UPLOAD_MAX_BYTES", 8 * 1024 * 1024)),
 };
+
+const AGENT_LABEL = CONFIG.agentProvider === "claude" ? "Claude" : "Codex";
+const AGENT_SESSION_LABEL = CONFIG.agentProvider === "claude" ? "session_id" : "thread_id";
 
 if (!CONFIG.token) {
   console.error("DISCORD_BOT_TOKEN is required.");
@@ -397,6 +410,40 @@ function buildCodexArgs(session, prompt) {
   return args;
 }
 
+function waitForChildExit(child, label) {
+  const timeoutMs = Math.max(0, CONFIG.agentTimeoutMs);
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let timeout = null;
+    let killTimer = null;
+
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      if (timeout) clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      fn(value);
+    };
+
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        try {
+          child.kill("SIGTERM");
+        } catch {}
+        killTimer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }, 5000);
+        finish(reject, new Error(`${label} timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
+
+    child.on("error", (err) => finish(reject, err));
+    child.on("close", (code) => finish(resolve, typeof code === "number" ? code : 1));
+  });
+}
+
 async function runCodex(session, prompt, extraEnv) {
   const args = buildCodexArgs(session, prompt);
   const env =
@@ -443,9 +490,7 @@ async function runCodex(session, prompt, extraEnv) {
     if (stderrLines.length > 80) stderrLines.shift();
   });
 
-  const exitCode = await new Promise((resolve) => {
-    child.on("close", resolve);
-  });
+  const exitCode = await waitForChildExit(child, "codex");
 
   if (exitCode !== 0) {
     const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-20).join("\n");
@@ -458,12 +503,102 @@ async function runCodex(session, prompt, extraEnv) {
   return { threadId, text: finalText };
 }
 
+function buildClaudeArgs(session, prompt) {
+  const args = ["-p", "--output-format", "json"];
+  if (CONFIG.claudeModel) args.push("--model", CONFIG.claudeModel);
+  if (CONFIG.claudePermissionMode) args.push("--permission-mode", CONFIG.claudePermissionMode);
+  if (session.threadId) args.push("--resume", session.threadId);
+  args.push(prompt);
+  return args;
+}
+
+function extractClaudeTextFromJson(parsed, fallbackText) {
+  if (!parsed || typeof parsed !== "object") return fallbackText;
+  if (typeof parsed.result === "string" && parsed.result.trim()) return parsed.result;
+  if (parsed.message && Array.isArray(parsed.message.content)) {
+    const text = parsed.message.content
+      .filter((part) => part && part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  }
+  return fallbackText;
+}
+
+async function runClaude(session, prompt, extraEnv) {
+  const args = buildClaudeArgs(session, prompt);
+  const env =
+    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
+  const child = spawn(CONFIG.claudeBin, args, {
+    cwd: session.workdir || CONFIG.defaultWorkdir,
+    env,
+  });
+
+  let stdout = "";
+  const stderrLines = [];
+  const stderrRl = readline.createInterface({ input: child.stderr });
+  stderrRl.on("line", (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    stderrLines.push(trimmed);
+    if (stderrLines.length > 80) stderrLines.shift();
+  });
+  child.stdout.on("data", (chunk) => {
+    stdout += String(chunk || "");
+    if (stdout.length > 1024 * 1024) stdout = stdout.slice(-1024 * 1024);
+  });
+
+  const exitCode = await waitForChildExit(child, "claude");
+
+  const stdoutTrimmed = stdout.trim();
+  if (exitCode !== 0) {
+    const detail = stderrLines.slice(-20).join("\n") || stdoutTrimmed.slice(-4000);
+    throw new Error(`claude exit ${exitCode}\n${detail}`.trim());
+  }
+
+  let parsed = null;
+  if (stdoutTrimmed) {
+    const lines = stdoutTrimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        parsed = JSON.parse(lines[i]);
+        break;
+      } catch {}
+    }
+    if (!parsed) {
+      try {
+        parsed = JSON.parse(stdoutTrimmed);
+      } catch {}
+    }
+  }
+
+  const fallbackText = stdoutTrimmed || "No message returned by Claude.";
+  const text = extractClaudeTextFromJson(parsed, fallbackText);
+  const threadId =
+    parsed && typeof parsed.session_id === "string" && parsed.session_id
+      ? parsed.session_id
+      : session.threadId || null;
+  return { threadId, text };
+}
+
+async function runAgent(session, prompt, extraEnv) {
+  if (CONFIG.agentProvider === "claude") {
+    return runClaude(session, prompt, extraEnv);
+  }
+  return runCodex(session, prompt, extraEnv);
+}
+
 function isStaleThreadResumeError(err) {
   const msg = String((err && err.message) || err || "");
   if (!msg) return false;
   return (
     msg.includes("failed to parse thread ID from rollout file") ||
-    msg.includes("state db missing rollout path for thread")
+    msg.includes("state db missing rollout path for thread") ||
+    msg.includes("No conversation found with session ID")
   );
 }
 
@@ -492,10 +627,10 @@ async function handleCommand(message, session, command, conversationKey) {
     await message.reply(
       [
         "Commands:",
-        "`/status` - show current Codex thread + workdir",
-        "`/reset` - reset Codex conversation for this Discord context",
+        `\`/status\` - show current ${AGENT_LABEL} session + workdir`,
+        `\`/reset\` - reset ${AGENT_LABEL} conversation for this Discord context`,
         "`/workdir <absolute_path>` - set workdir (resets thread)",
-        "`/attach <thread_id>` - attach this Discord context to an existing Codex session (DM-only by default)",
+        `\`/attach <session_id>\` - attach this Discord context to an existing ${AGENT_LABEL} session (DM-only by default)`,
         "`/upload <path>` - upload an image from this conversation's upload directory",
       ].join("\n")
     );
@@ -507,7 +642,7 @@ async function handleCommand(message, session, command, conversationKey) {
     const uploadDir = getConversationUploadDir(key);
     await message.reply(
       [
-        `thread_id: ${session.threadId || "none"}`,
+        `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
         `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
         `upload_dir: ${uploadDir}`,
       ].join("\n")
@@ -519,7 +654,7 @@ async function handleCommand(message, session, command, conversationKey) {
     session.threadId = null;
     session.updatedAt = new Date().toISOString();
     await queueSaveState();
-    await message.reply("Session reset. Next message starts a new Codex thread.");
+    await message.reply(`Session reset. Next message starts a new ${AGENT_LABEL} session.`);
     return true;
   }
 
@@ -559,22 +694,22 @@ async function handleCommand(message, session, command, conversationKey) {
 
   if (command.name === "attach") {
     if (!command.arg) {
-      await message.reply("Usage: `/attach <thread_id>`");
+      await message.reply("Usage: `/attach <session_id>`");
       return true;
     }
     if (message.guildId && !CONFIG.allowAttachInGuilds) {
-      await message.reply("For safety, `/attach` is DM-only. DM me with `/attach <thread_id>`.");
+      await message.reply("For safety, `/attach` is DM-only. DM me with `/attach <session_id>`.");
       return true;
     }
     const id = command.arg.split(/\s+/)[0];
     if (!/^[0-9a-zA-Z_-][0-9a-zA-Z_.:-]{5,127}$/.test(id)) {
-      await message.reply("That doesn't look like a valid Codex session/thread id.");
+      await message.reply(`That doesn't look like a valid ${AGENT_LABEL} session id.`);
       return true;
     }
     session.threadId = id;
     session.updatedAt = new Date().toISOString();
     await queueSaveState();
-    await message.reply(`Attached. thread_id is now: \`${id}\``);
+    await message.reply(`Attached. ${AGENT_SESSION_LABEL} is now: \`${id}\``);
     return true;
   }
 
@@ -620,7 +755,7 @@ async function main() {
   });
 
   client.once("clientReady", () => {
-    console.log(`codex-discord-relay connected as ${client.user.tag}`);
+    console.log(`codex-discord-relay (${CONFIG.agentProvider}) connected as ${client.user.tag}`);
   });
 
   client.on("messageCreate", async (message) => {
@@ -671,7 +806,7 @@ async function main() {
         return;
       }
 
-      const pendingMsg = await message.reply("Running Codex...");
+      const pendingMsg = await message.reply(`Running ${AGENT_LABEL}...`);
       await enqueueConversation(key, async () => {
         try {
           await message.channel.sendTyping();
@@ -681,7 +816,7 @@ async function main() {
           }
           let result;
           try {
-            result = await runCodex(
+            result = await runAgent(
               session,
               prompt,
               CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
@@ -692,13 +827,13 @@ async function main() {
             session.threadId = null;
             session.updatedAt = new Date().toISOString();
             await queueSaveState();
-            result = await runCodex(
+            result = await runAgent(
               session,
               prompt,
               CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
             );
             result.text =
-              `Note: previous Codex session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
+              `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
               (result.text || "");
           }
           session.threadId = result.threadId || session.threadId;
@@ -734,7 +869,7 @@ async function main() {
           }
         } catch (err) {
           const detail = String(err.message || err).slice(0, 1800);
-          await pendingMsg.edit(`Codex error:\n\`\`\`\n${detail}\n\`\`\``);
+          await pendingMsg.edit(`${AGENT_LABEL} error:\n\`\`\`\n${detail}\n\`\`\``);
         }
       });
     } catch (err) {

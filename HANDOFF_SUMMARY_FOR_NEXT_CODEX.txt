@@ -153,3 +153,25 @@ run/log paths: relay_log=/root/.codex-discord-relay/relay.log state=/root/.codex
 training: not active (epoch=N/A metrics=N/A)
 task end update: relay fix deployed (commit 5440c38) and runtime stabilized
 ---
+[2026-02-16T20:34:00+08:00] owner: codex
+objective: diagnose and fix Codex + OpenClaw Discord agent failures after Claude Code setup attempt
+skills: codex-discord-relay-stuck-check, systematic-debugging
+run/log paths: relay=/root/.codex-discord-relay openclaw=/root/.openclaw toolkit=/root/openclaw-codex-discord-skills-kit
+training: not active (epoch=N/A metrics=N/A)
+---
+[2026-02-16T20:44:39+08:00] owner: codex
+major action: patched relay timeout handling + env/docs for Claude/Codex runtime stability
+details: added RELAY_AGENT_TIMEOUT_MS (default 600000) and shared waitForChildExit() in toolkit relay.js; removed dependency on ad-hoc runtime-only 60s timeout patch
+files: /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js /root/openclaw-codex-discord-skills-kit/codex-discord-relay/.env.example /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md
+run/log paths: relay_env=/root/.codex-discord-relay.env relay_state=/root/.codex-discord-relay/sessions.json relay_log=/root/.codex-discord-relay/relay.log openclaw_log=/root/.openclaw/log/manual-gateway.log
+training: not active (epoch=N/A metrics=N/A)
+---
+[2026-02-16T20:44:39+08:00] owner: codex
+major action: redeployed relay from toolkit and verified service health
+actions: ran /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh; restarted default relay with codex-discord-relay-multictl restart default; ensured RELAY_AGENT_TIMEOUT_MS=600000 in /root/.codex-discord-relay.env
+verification: /root/openclaw-codex-discord-skills-kit/scripts/healthcheck.sh => OpenClaw gateway OK + Discord OK + relay running pid=5509
+verification: runtime /root/codex-discord-relay/relay.js includes waitForChildExit and no hardcoded 60s timeout
+run/log paths: healthcheck=/root/openclaw-codex-discord-skills-kit/scripts/healthcheck.sh relay_log=/root/.codex-discord-relay/relay.log state_dir=/root/.codex-discord-relay
+training: not active (epoch=N/A metrics=N/A)
+task end: root-cause fixed (over-aggressive 60s timeout); relay/openclaw recovered and currently healthy
+---

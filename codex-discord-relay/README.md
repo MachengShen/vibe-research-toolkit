@@ -1,17 +1,20 @@
 # Codex Discord Relay
 
-Direct Discord -> Codex CLI relay so you can chat with Codex from Discord (including iPhone) without going through OpenClaw.
+Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Discord (including iPhone) without going through OpenClaw.
 
 ## What it does
 
 - Replies in DMs. In guild channels it replies when mentioned; in threads it can auto-respond without mention (see `RELAY_THREAD_AUTO_RESPOND`).
-- Persists a Codex `thread_id` per Discord conversation.
+- Persists an agent session id per Discord conversation.
 - Queues messages per conversation to avoid overlap.
+- Supports two backends via `RELAY_AGENT_PROVIDER`:
+  - `codex` (default): uses `codex exec` / `codex exec resume`
+  - `claude`: uses `claude -p --output-format json --resume`
 - Supports quick commands:
   - `/status`
   - `/reset`
   - `/workdir /absolute/path`
-  - `/attach <thread_id>`
+  - `/attach <session_id>`
   - `/upload <path>`
   - `/help`
 
@@ -29,6 +32,17 @@ npm install
 ```bash
 cp /root/codex-discord-relay/.env.example /root/.codex-discord-relay.env
 chmod 600 /root/.codex-discord-relay.env
+```
+
+If you want Claude backend, set in `/root/.codex-discord-relay.env`:
+
+```bash
+RELAY_AGENT_PROVIDER=claude
+CLAUDE_BIN=claude
+# optional:
+# CLAUDE_MODEL=sonnet
+# CLAUDE_PERMISSION_MODE=default
+# RELAY_AGENT_TIMEOUT_MS=900000
 ```
 
 3. Start/recover service:
@@ -74,10 +88,12 @@ codex-discord-relay-multictl logs default
 
 ## Notes
 
-- Default `CODEX_APPROVAL=never` prevents approval prompts from blocking mobile usage.
+- `RELAY_AGENT_PROVIDER=codex|claude` selects the backend.
+- `RELAY_AGENT_TIMEOUT_MS` controls max runtime per agent call (default `600000` ms, set `0` to disable).
+- Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.
 - Keep `CODEX_SANDBOX=workspace-write` unless you intentionally need broader access.
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
-- The relay edits the initial `Running Codex...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
+- The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - Image uploads: Codex can ask the relay to upload a local image by including `[[upload:some.png]]` in its response (or you can use `/upload some.png`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`.
 - If Discord is blocked on your network, the relay supports proxies via `DISCORD_GATEWAY_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`.
@@ -100,7 +116,7 @@ These `.env` variables control intermediate status edits in Discord:
 # 1) Is relay alive?
 codex-discord-relay-multictl list
 
-# 2) Are Codex child jobs stuck?
+# 2) Are Codex child jobs stuck? (Codex mode only)
 pgrep -af "codex .*exec" || true
 
 # 3) Check relay logs
@@ -111,4 +127,5 @@ Frequent causes:
 
 - Proxy/network issues: `ETIMEDOUT ...:443` in relay log.
 - Old Node runtime: `Cannot find module 'node:fs'` or `node:fs/promises`.
-- Hung Codex child run blocks that conversation queue until process exits or relay restarts.
+- Hung Codex child run (Codex mode) blocks that conversation queue until process exits or relay restarts.
+- Timeout too low for long prompts: if you see `codex timeout ...` or `claude timeout ...`, increase `RELAY_AGENT_TIMEOUT_MS`.

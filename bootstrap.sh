@@ -28,6 +28,11 @@ fi
 # Codex relay (required for vibe coding via Discord)
 "$ROOT_DIR/scripts/install_codex_discord_relay.sh"
 
+# Optional: install packaged local skills into CODEX_HOME/skills.
+if [[ "${OPENCLAW_INSTALL_PACKAGED_SKILLS:-true}" =~ ^(1|true|yes|on)$ ]]; then
+  "$ROOT_DIR/scripts/install_packaged_skills.sh" || true
+fi
+
 # Periodic self-update service for this toolkit
 "$ROOT_DIR/scripts/install_openclaw_kit_autoupdate.sh"
 

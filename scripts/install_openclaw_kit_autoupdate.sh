@@ -62,7 +62,7 @@ else
     1|true|yes|on)
       cat > "$FALLBACK_CRON_FILE" <<EOF
 # Fallback auto-update schedule when systemd is unavailable.
-$AUTOUPDATE_CRON root /usr/local/bin/openclaw-kit-autoupdate.sh
+$AUTOUPDATE_CRON root OPENCLAW_KIT_REPO_DIR=${AUTOUPDATE_REPO_DIR} OPENCLAW_PROXY_ENV_FILE=${PROXY_ENV_FILE} OPENCLAW_KIT_AUTOUPDATE_LOG=${AUTOUPDATE_LOG} /usr/local/bin/openclaw-kit-autoupdate.sh
 EOF
       chmod 644 "$FALLBACK_CRON_FILE"
       log "systemd not available; installed cron fallback at $FALLBACK_CRON_FILE ($AUTOUPDATE_CRON)"

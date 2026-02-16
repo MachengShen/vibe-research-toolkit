@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenClaw Media Send"
+  short_description: "Send Discord attachments via OpenClaw CLI"
+  default_prompt: "When the user asks to send/upload an image/file to Discord (and we are not behind codex-discord-relay), use the OpenClaw CLI to send it: prefer `openclaw message send --channel discord --target channel:<id> --media <path> --message \"...\" --json`. If the destination is unclear, ask for the Discord channel ID or use `openclaw channels resolve --channel discord --kind group ... --json` to find it. Use --dry-run if you are unsure about the target format. Never attach secrets."

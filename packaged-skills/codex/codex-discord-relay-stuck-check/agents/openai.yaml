@@ -1,0 +1,5 @@
+interface:
+  display_name: "Codex Discord Relay Stuck Check"
+  short_description: "Diagnose Discord relay stalls"
+  default_prompt: "When the user reports Codex via Discord is stuck/stalled, run the codex-discord-relay stuck-check workflow: check relay instance status, tail relay logs, verify watchdog cron behavior, look for hung `codex exec` processes, confirm proxy env (GFW) is loaded, and summarize the most likely cause plus safe recovery steps. Never print tokens; redact env/proxy values."
+

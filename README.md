@@ -1,10 +1,15 @@
-# OpenClaw + Codex Discord Kit
+# OpenClaw + Codex Discord + Skills Kit
 
 Portable setup kit for:
 - OpenClaw Gateway + dashboard
 - OpenClaw Discord channel (optional)
 - Proxy env (China/GFW)
 - Direct Discord -> Codex CLI relay (so you can vibe code from iPhone)
+- Reusable local Codex skills (packaged + installable)
+
+Repository rename note:
+- Canonical repo name is now `openclaw-codex-discord-skills-kit`.
+- Previous name `openclaw-codex-discord-kit` may still work via GitHub redirect.
 
 ## Quick Start (new machine, one-shot)
 
@@ -12,7 +17,7 @@ Portable setup kit for:
 
 ```bash
 git clone <your-repo-url>
-cd openclaw-codex-discord-kit
+cd openclaw-codex-discord-skills-kit
 ```
 
 2. Create config (secrets live here, never committed):
@@ -51,6 +56,7 @@ Bootstrap installs:
 - `/etc/systemd/system/openclaw-kit-autoupdate.timer`
 - Cron entries for gateway + relay ensure scripts (`@reboot` + periodic ensure)
 - Proxy env at `/root/.openclaw/proxy.env` (or `$OPENCLAW_STATE_DIR/proxy.env`) sourced by ensure scripts and autoupdate script
+- Packaged custom skills from `packaged-skills/codex/*` installed into `$CODEX_HOME/skills` (default `~/.codex/skills`)
 
 Relay multi-instance state layout:
 
@@ -87,6 +93,38 @@ tail -n 120 /var/log/openclaw-kit-autoupdate.log
 
 # If systemd is unavailable (container/minimal init), fallback cron is used:
 cat /etc/cron.d/openclaw-kit-autoupdate
+
+# Packaged skills:
+bash ./scripts/install_packaged_skills.sh --list
+ls -la "${CODEX_HOME:-$HOME/.codex}/skills"
+```
+
+## Packaged Skills
+
+This repo bundles reusable local skills under:
+
+- `packaged-skills/codex/codex-discord-relay-stuck-check`
+- `packaged-skills/codex/discord-image-upload`
+- `packaged-skills/codex/openclaw-media-send`
+- `packaged-skills/codex/periodic-mechanistic-service`
+
+Install/update bundled skills with one command:
+
+```bash
+bash ./scripts/install_packaged_skills.sh
+```
+
+Useful options:
+
+```bash
+# only install selected skills
+bash ./scripts/install_packaged_skills.sh --only "discord-image-upload,openclaw-media-send"
+
+# do not overwrite existing installed skills
+bash ./scripts/install_packaged_skills.sh --overwrite false
+
+# preview actions
+bash ./scripts/install_packaged_skills.sh --dry-run
 ```
 
 ## Auto-Update Config

@@ -1,0 +1,5 @@
+# Packaged custom skills installed by scripts/install_packaged_skills.sh
+codex/codex-discord-relay-stuck-check
+codex/discord-image-upload
+codex/openclaw-media-send
+codex/periodic-mechanistic-service

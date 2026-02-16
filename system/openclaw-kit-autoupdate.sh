@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-KIT_REPO_DIR="${OPENCLAW_KIT_REPO_DIR:-/root/openclaw-codex-discord-kit}"
+DEFAULT_REPO_DIR="/root/openclaw-codex-discord-skills-kit"
+if [[ ! -d "$DEFAULT_REPO_DIR/.git" && -d "/root/openclaw-codex-discord-kit/.git" ]]; then
+  DEFAULT_REPO_DIR="/root/openclaw-codex-discord-kit"
+fi
+KIT_REPO_DIR="${OPENCLAW_KIT_REPO_DIR:-$DEFAULT_REPO_DIR}"
 PROXY_ENV_FILE="${OPENCLAW_PROXY_ENV_FILE:-/root/.openclaw/proxy.env}"
 LOG_FILE="${OPENCLAW_KIT_AUTOUPDATE_LOG:-/var/log/openclaw-kit-autoupdate.log}"
 LOCK_FILE="${OPENCLAW_KIT_AUTOUPDATE_LOCK:-/tmp/openclaw-kit-autoupdate.lock}"
+SETUP_ENV_FILE="${OPENCLAW_KIT_SETUP_ENV_FILE:-$KIT_REPO_DIR/config/setup.env}"
 
 mkdir -p "$(dirname "$LOG_FILE")"
 touch "$LOG_FILE"
@@ -30,6 +35,13 @@ if [[ -f "$PROXY_ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$PROXY_ENV_FILE"
+  set +a
+fi
+
+if [[ -f "$SETUP_ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$SETUP_ENV_FILE"
   set +a
 fi
 
@@ -68,6 +80,7 @@ fi
 log "re-applying deployment scripts"
 "$KIT_REPO_DIR/scripts/install_openclaw_gateway_watchdog.sh" >>"$LOG_FILE" 2>&1
 "$KIT_REPO_DIR/scripts/install_codex_discord_relay.sh" >>"$LOG_FILE" 2>&1
+"$KIT_REPO_DIR/scripts/install_packaged_skills.sh" >>"$LOG_FILE" 2>&1 || true
 "$KIT_REPO_DIR/scripts/install_openclaw_kit_autoupdate.sh" >>"$LOG_FILE" 2>&1
 "$KIT_REPO_DIR/scripts/install_cron.sh" >>"$LOG_FILE" 2>&1
 
@@ -96,4 +109,3 @@ elif [[ -x /usr/local/bin/codex-discord-relayctl ]]; then
 fi
 
 log "auto-update run complete"
-

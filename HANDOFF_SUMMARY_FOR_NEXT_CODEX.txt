@@ -52,3 +52,39 @@ Next steps:
   /etc/cron.d/openclaw-kit-autoupdate => `17 3 * * * root /usr/local/bin/openclaw-kit-autoupdate.sh`
 - Relay run state check: `/usr/local/bin/codex-discord-relay-multictl list` reports default instance running.
 [2026-02-16T13:56:41+08:00] (codex) Task start: user requested commit of current toolkit changes so repo is clean for future auto-update runs (ff-only). Objective: validate, stage relevant files, create commit on main.
+[2026-02-16T13:57:40+08:00] (codex) Major action: committed toolkit changes to git.
+- Commit: edcbde3
+- Message: Add multi-instance relay deploy + periodic toolkit auto-update
+- Includes: multi-instance relay installer wrappers, systemd+cron-fallback autoupdate pipeline, bootstrap wiring, config/docs updates, and prior relay/docs enhancements in codex-discord-relay/*.
+
+[2026-02-16T13:57:40+08:00] (codex) Verification:
+- `git status --short --branch` => clean tree, main is ahead of origin by 1 commit.
+- `/usr/local/bin/openclaw-kit-autoupdate.sh` manual run succeeded and logged deployment reconciliation to /var/log/openclaw-kit-autoupdate.log.
+- Active schedules: user crontab ensure-multi entries; /etc/cron.d/openclaw-kit-autoupdate fallback daily schedule.
+
+[2026-02-16T13:57:40+08:00] (codex) Task end: repo dirty state resolved (committed). Next step for cross-host ff-only updates: push commit `edcbde3` to origin/main.
+[2026-02-16T14:03:42+08:00] (codex) Task start: user requested pushing local commit edcbde3 to origin/main and clarification about skill scope (local vs account-level).
+[2026-02-16T14:04:06+08:00] (codex) Major action: pushed commit `edcbde3` to remote.
+- Remote: origin (https://github.com/MachengShen/openclaw-codex-discord-kit.git)
+- Ref update: main 0dcfa73 -> edcbde3
+- Verification: `git status --short --branch` now shows `main...origin/main` (no ahead/behind).
+
+[2026-02-16T14:04:06+08:00] (codex) Task end: push complete. Remaining local modification is only this HANDOFF log append.
+[2026-02-16T14:14:30+08:00] (codex) Task start: package custom local Codex skills into toolkit repo with one-command installer for new machines; optionally attempt repository rename to reflect skills packaging.
+[2026-02-16T14:13:00+08:00] (codex) Major action: packaged custom skills into toolkit repo for cross-machine reuse.
+- Added bundle root: /root/openclaw-codex-discord-kit/packaged-skills
+- Bundled skills:
+  - codex-discord-relay-stuck-check
+  - discord-image-upload
+  - openclaw-media-send
+  - periodic-mechanistic-service
+- Added installer: /root/openclaw-codex-discord-kit/scripts/install_packaged_skills.sh
+- Bootstrap now installs packaged skills when OPENCLAW_INSTALL_PACKAGED_SKILLS=true.
+
+[2026-02-16T14:13:00+08:00] (codex) Major action: repository renamed on GitHub via gh CLI.
+- Old: MachengShen/openclaw-codex-discord-kit
+- New: MachengShen/openclaw-codex-discord-skills-kit
+- Updated local origin URL accordingly.
+
+[2026-02-16T14:13:00+08:00] (codex) Major action: improved autoupdate fallback for non-systemd hosts.
+- /etc/cron.d/openclaw-kit-autoupdate now includes explicit env vars for repo/proxy/log path, so renamed/relocated repo paths continue to work.

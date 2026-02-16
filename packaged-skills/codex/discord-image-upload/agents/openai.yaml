@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discord Image Upload"
+  short_description: "Attach local images in Discord"
+  default_prompt: "When the user asks to send/upload an image in Discord, attach it via codex-discord-relay: include one or more plain-text [[upload:<path>]] lines in your final reply (not in a code block). Prefer writing new images to $RELAY_UPLOAD_DIR and uploading by filename (e.g. [[upload:plot.png]]). If the user points to an existing local image and absolute-path uploads are allowed, use an absolute path within allowed roots (e.g. [[upload:/root/.../img.png]])."

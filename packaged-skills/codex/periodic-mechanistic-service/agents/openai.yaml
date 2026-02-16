@@ -1,0 +1,5 @@
+interface:
+  display_name: "Periodic Service Bootstrap"
+  short_description: "Set up recurring systemd jobs"
+  default_prompt: "When a user asks for recurring mechanistic automation, create a systemd service+timer with safe defaults: validate inputs, install units, enable/start timer, verify status/logs, and provide rollback commands. Prefer the bundled installer script and keep secrets out of logs."
+

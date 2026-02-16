@@ -126,3 +126,21 @@ latest updater check line: checking updates (repo=/root/openclaw-codex-discord-s
 training: not active (epoch=N/A metrics=N/A)
 task end: rename + cron/env rewiring + auto-update verification complete
 ---
+[2026-02-16T14:53:07+08:00] owner: codex
+objective: diagnose Discord Codex agent failure: 'failed to parse thread ID from rollout file'
+skills: codex-discord-relay-stuck-check, systematic-debugging
+run/log paths: relay_state=/root/.codex-discord-relay relay_logs=/root/.codex-discord-relay/logs relay_runtime=/root/codex-discord-relay/runtime
+training: not active (epoch=N/A metrics=N/A)
+---
+[2026-02-16T14:57:43+08:00] owner: codex
+major findings: relay process healthy; one saved session had stale thread id causing resume failure
+root cause evidence: codex exec resume 85e79fe7-925d-4387-a70f-297318b1a719 => 'failed to parse thread ID from rollout file' (exit 1)
+major action: patched relay stale-thread auto-recovery in /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+behavior change: on stale resume error, clear session.threadId, persist sessions.json, retry once with fresh thread
+major action: deployed patch via /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+major action: cleaned state /root/.codex-discord-relay/sessions.json (dm:868020619499937792 threadId set to null from bad id)
+run/log paths: relay_state=/root/.codex-discord-relay/sessions.json relay_log=/root/.codex-discord-relay/relay.log ctl=/usr/local/bin/codex-discord-relay-multictl
+current run state: default relay running pid=38540
+training: not active (epoch=N/A metrics=N/A)
+task end: diagnosis + mitigation complete; recommend Discord smoke test message in affected DM/channel
+---

@@ -458,6 +458,15 @@ async function runCodex(session, prompt, extraEnv) {
   return { threadId, text: finalText };
 }
 
+function isStaleThreadResumeError(err) {
+  const msg = String((err && err.message) || err || "");
+  if (!msg) return false;
+  return (
+    msg.includes("failed to parse thread ID from rollout file") ||
+    msg.includes("state db missing rollout path for thread")
+  );
+}
+
 async function enqueueConversation(key, task) {
   const prev = queueByConversation.get(key) || Promise.resolve();
   const next = prev.catch(() => {}).then(task);
@@ -670,11 +679,28 @@ async function main() {
           if (CONFIG.uploadEnabled) {
             await fsp.mkdir(uploadDir, { recursive: true });
           }
-          const result = await runCodex(
-            session,
-            prompt,
-            CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
-          );
+          let result;
+          try {
+            result = await runCodex(
+              session,
+              prompt,
+              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
+            );
+          } catch (runErr) {
+            if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
+            const staleThreadId = session.threadId;
+            session.threadId = null;
+            session.updatedAt = new Date().toISOString();
+            await queueSaveState();
+            result = await runCodex(
+              session,
+              prompt,
+              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
+            );
+            result.text =
+              `Note: previous Codex session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
+              (result.text || "");
+          }
           session.threadId = result.threadId || session.threadId;
           session.updatedAt = new Date().toISOString();
           await queueSaveState();

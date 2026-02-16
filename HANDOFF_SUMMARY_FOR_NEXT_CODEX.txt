@@ -144,3 +144,12 @@ current run state: default relay running pid=38540
 training: not active (epoch=N/A metrics=N/A)
 task end: diagnosis + mitigation complete; recommend Discord smoke test message in affected DM/channel
 ---
+[2026-02-16T15:00:34+08:00] owner: codex
+major action: synchronized in-memory and on-disk relay session state for stale DM thread
+details: stop default relay -> set threadId null for dm:868020619499937792 in /root/.codex-discord-relay/sessions.json -> start default relay
+verification: codex-discord-relay-multictl list reports running pid=40462
+verification: sessions.json now keeps dm threadId null (no stale 85e79... id)
+run/log paths: relay_log=/root/.codex-discord-relay/relay.log state=/root/.codex-discord-relay/sessions.json
+training: not active (epoch=N/A metrics=N/A)
+task end update: relay fix deployed (commit 5440c38) and runtime stabilized
+---

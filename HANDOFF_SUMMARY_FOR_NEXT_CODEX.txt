@@ -95,3 +95,25 @@ Next steps:
 - Auto-update validation log path: /var/log/openclaw-kit-autoupdate.log
 - Runtime relay paths referenced/validated: /root/.codex-discord-relay/relay.log, /root/.codex-discord-relay/sessions.json
 - Scheduler state on this host: /etc/cron.d/openclaw-kit-autoupdate (systemd unavailable), plus user crontab ensure-multi watchdog entries.
+[2026-02-16T14:37:04+08:00] owner: codex
+objective: rename local repo folder to /root/openclaw-codex-discord-skills-kit and rewire autoupdate/cron to new path
+action: starting rename + installer re-run
+paths: repo_old=/root/openclaw-codex-discord-kit repo_new=/root/openclaw-codex-discord-skills-kit cron=/etc/cron.d/openclaw-kit-autoupdate updater=/usr/local/bin/openclaw-kit-autoupdate.sh
+---
+[2026-02-16T14:37:17+08:00] owner: codex
+major action: renamed repo directory
+details: /root/openclaw-codex-discord-kit -> /root/openclaw-codex-discord-skills-kit
+---
+[2026-02-16T14:37:26+08:00] owner: codex
+major action: re-ran installers from renamed repo
+details: scripts/install_openclaw_kit_autoupdate.sh and scripts/install_packaged_skills.sh completed
+paths: cron=/etc/cron.d/openclaw-kit-autoupdate skills_dest=/root/.codex/skills
+---
+[2026-02-16T14:37:50+08:00] owner: codex
+major action: verification run + updater smoke test
+result: /etc/cron.d/openclaw-kit-autoupdate now points to /root/openclaw-codex-discord-skills-kit
+run/log paths: cron=/etc/cron.d/openclaw-kit-autoupdate updater=/usr/local/bin/openclaw-kit-autoupdate.sh updater_log=/var/log/openclaw-kit-autoupdate.log
+run state: manual updater invocation skipped due local git changes (handoff log edits)
+training: not active (epoch=N/A metrics=N/A)
+task end: local rename+rewire complete; next step is commit handoff log to restore clean autoupdate runs
+---

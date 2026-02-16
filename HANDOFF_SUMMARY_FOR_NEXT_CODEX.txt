@@ -175,3 +175,11 @@ run/log paths: healthcheck=/root/openclaw-codex-discord-skills-kit/scripts/healt
 training: not active (epoch=N/A metrics=N/A)
 task end: root-cause fixed (over-aggressive 60s timeout); relay/openclaw recovered and currently healthy
 ---
+[2026-02-16T20:45:58+08:00] owner: codex
+major action: committed relay recovery changes to keep toolkit repo clean for auto-update
+commit: 96e5f06fdf9fbfd8a724343683c9f2d729fb9048
+state: /root/openclaw-codex-discord-skills-kit is clean (ahead of origin by 1)
+run/log paths: repo=/root/openclaw-codex-discord-skills-kit relay_log=/root/.codex-discord-relay/relay.log openclaw_health=openclaw gateway health
+training: not active (epoch=N/A metrics=N/A)
+task end update: relay+gateway healthy after commit; push pending only if user requests
+---

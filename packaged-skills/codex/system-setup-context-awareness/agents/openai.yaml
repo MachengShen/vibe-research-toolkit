@@ -1,0 +1,3 @@
+interface:
+  display_name: "System Setup Context"
+  short_description: "Use global working-memory + handoff files for machine-level tasks"

@@ -1,0 +1,8 @@
+# Compatibility expectations for scripts/verify_install.sh
+# Use major versions for drift-tolerant checks.
+
+OPENCLAW_EXPECTED_VERSION=2026.2.12
+CODEX_EXPECTED_MAJOR=0
+NODE_EXPECTED_MAJOR=24
+NPM_EXPECTED_MAJOR=11
+PYTHON_EXPECTED_MAJOR=3

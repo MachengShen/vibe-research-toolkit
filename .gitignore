@@ -3,6 +3,9 @@ config/setup.env
 config/*.env
 *.env
 
+# Allow redacted machine snapshots to be tracked.
+!machine-state/**/*.env
+
 # Runtime state
 *.log
 .tmp
@@ -11,6 +14,13 @@ config/*.env
 # Node
 node_modules/
 npm-debug.log*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # OS/package locks from installers
 *.pid

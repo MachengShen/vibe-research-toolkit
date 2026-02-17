@@ -474,3 +474,8 @@ Training status: inactive (no active training run, epoch/metrics N/A).
   1) in Discord, send `/context`, then `/context reload`, then one normal prompt in the target thread
   2) check `/root/.codex-discord-relay/relay.log` for `agent.run.context_injected` and confirm expected behavior
 - Training status: no active training run in this task; epoch/metrics N/A.
+[2026-02-17T20:17:45+08:00] owner=codex objective=discord relay smoke test + review + commit/push (major action)
+- Added follow-up handoff-log sync commit after final task entries were appended.
+- Commit pushed: 5d56d98f4c94f668898f6f63a3d612f5b1966dd9 (HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt only).
+- Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/.codex-discord-relay/relay.log
+- Training status: inactive; epoch/metrics N/A.

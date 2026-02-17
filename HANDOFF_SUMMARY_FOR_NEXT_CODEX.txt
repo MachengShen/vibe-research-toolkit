@@ -551,3 +551,12 @@ Training status: inactive (no active training run, epoch/metrics N/A).
     - example/default RELAY_CONTEXT_FILE includes system tails: tail:/root/SYSTEM_SETUP_WORKING_MEMORY.md ; tail:/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
   - templates/global-context/relay-context.md: added Agent system overview path in Key Paths table
 - Runtime note: live envs were updated and relays restarted; context injection now uses ~39k chars across 3 files.
+
+[2026-02-17T22:31:20+08:00] owner=codex objective=Verify relay/toolkit parity + automation status
+- Repo updated and pushed:
+  - commit 228e02f: relay context budgets default to 40k chars; live env uses RELAY_CONTEXT_MAX_CHARS=40000.
+  - commit c5aef26: track machine-state snapshot (redacted), state sync scripts, missing packaged skill dirs, versions.lock, .gitignore updates.
+- Verified /usr/local/bin scripts match repo copies after running /usr/local/bin/openclaw-kit-autoupdate.sh.
+- Automation status:
+  - /etc/cron.d/openclaw-kit-autoupdate present (daily) and no longer skipping due to dirty repo.
+  - /etc/cron.d/openclaw-state-sync missing because OPENCLAW_STATE_SYNC_CRON_ENABLED=false by default.

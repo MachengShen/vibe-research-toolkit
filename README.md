@@ -115,7 +115,14 @@ bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push fal
 
 ## Global Agent Context Templates
 
-Templates for global context files that every agent reads automatically. Copy to the correct location on a new machine:
+Templates for global context files that every agent reads automatically.
+
+By default, `bootstrap.sh` now installs these templates automatically to `/root`:
+- `/root/AGENTS.md`
+- `/root/.claude/CLAUDE.md`
+- `/root/AGENT_SYSTEM_OVERVIEW.md`
+
+Manual copy commands (optional) are still available:
 
 ```bash
 # For Claude (reads ~/.claude/CLAUDE.md on every session)
@@ -123,6 +130,9 @@ cp templates/global-context/CLAUDE.md ~/.claude/CLAUDE.md
 
 # For Codex (reads ~/AGENTS.md on every session)
 cp templates/global-context/AGENTS.md ~/AGENTS.md
+
+# Shared quick system overview for both agents
+cp templates/global-context/AGENT_SYSTEM_OVERVIEW.md ~/AGENT_SYSTEM_OVERVIEW.md
 ```
 
 These files tell both agents about:
@@ -132,6 +142,11 @@ These files tell both agents about:
 - Relay infrastructure and key paths
 
 Edit after copying to adjust any machine-specific paths.
+
+Global-context bootstrap toggles in `config/setup.env`:
+- `OPENCLAW_INSTALL_GLOBAL_CONTEXT=true|false` (default `true`)
+- `OPENCLAW_GLOBAL_CONTEXT_OVERWRITE=true|false` (default `false`)
+- `OPENCLAW_GLOBAL_CONTEXT_TARGET_HOME=/absolute/path` (default `/root`)
 
 ## Packaged Skills
 
@@ -200,13 +215,15 @@ To automate this direction, enable cron fallback in `config/setup.env`:
 
 Then run bootstrap (or directly run `scripts/install_local_state_sync_cron.sh`).
 
-## Bootstrap Secrets Mode
+## Bootstrap Optional Flags
 
-Bootstrap supports explicit snapshot-secret mode:
+Bootstrap supports explicit snapshot-secret mode and global-context overrides:
 
 ```bash
 sudo ./bootstrap.sh --no-secrets
 sudo ./bootstrap.sh --with-secrets
+sudo ./bootstrap.sh --no-global-context
+sudo ./bootstrap.sh --global-context-overwrite
 ```
 
 Related env toggles:
@@ -214,6 +231,9 @@ Related env toggles:
 - `OPENCLAW_APPLY_SNAPSHOT_ON_BOOTSTRAP=true|false`
 - `OPENCLAW_EXPORT_SNAPSHOT_ON_BOOTSTRAP=true|false`
 - `OPENCLAW_SYNC_LOCAL_SKILLS_ON_BOOTSTRAP=true|false`
+- `OPENCLAW_INSTALL_GLOBAL_CONTEXT=true|false`
+- `OPENCLAW_GLOBAL_CONTEXT_OVERWRITE=true|false`
+- `OPENCLAW_GLOBAL_CONTEXT_TARGET_HOME=/absolute/path`
 
 ## Relay Stall Triage (Quick)
 

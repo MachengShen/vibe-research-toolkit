@@ -479,3 +479,65 @@ Training status: inactive (no active training run, epoch/metrics N/A).
 - Commit pushed: 5d56d98f4c94f668898f6f63a3d612f5b1966dd9 (HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt only).
 - Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/.codex-discord-relay/relay.log
 - Training status: inactive; epoch/metrics N/A.
+[2026-02-17T20:21:45+08:00] owner=codex objective=restore relay YOLO mode (task start)
+- Objective: diagnose Discord relay sandbox failure report (`Sandbox(LandlockRestrict)`) and restore Codex relay to no-approval YOLO mode.
+- Initial evidence:
+  - /root/.codex-discord-relay.env has `CODEX_SANDBOX=workspace-write` and `CODEX_APPROVAL=never`.
+  - Relay is running (`codex-discord-relay-multictl status all`), failure is runtime sandbox restriction, not relay-down.
+- Planned run/log paths:
+  - /root/.codex-discord-relay.env
+  - /root/.codex-discord-relay/instances.d/claude.env
+  - /root/.codex-discord-relay/relay.log
+  - /root/.codex-discord-relay/sessions.json
+- Training status: no active training run in this task; latest epoch/metrics N/A.
+[2026-02-17T20:23:40+08:00] owner=codex objective=restore relay YOLO mode (major action)
+- Root-cause evidence captured:
+  - Live relay env had `CODEX_SANDBOX=workspace-write` in `/root/.codex-discord-relay.env`.
+  - User-observed failure text (`Sandbox(LandlockRestrict)`) is consistent with command execution under restricted sandbox mode.
+  - Relay process/health was otherwise normal (not a relay-down incident).
+- Runtime configuration changes applied:
+  - `/root/.codex-discord-relay.env`: `CODEX_SANDBOX=danger-full-access`, `CODEX_APPROVAL=never`
+  - `/root/.codex-discord-relay/instances.d/claude.env`: `CODEX_SANDBOX=danger-full-access`, `CODEX_APPROVAL=never` (kept consistent)
+- Relay restart + verification:
+  - `codex-discord-relay-multictl start all`
+  - Running PIDs: default=4490, claude=4521
+  - `/proc/<pid>/environ` confirms `CODEX_SANDBOX=danger-full-access` for running relay processes.
+- Command-path probe (post-change):
+  - `codex exec --sandbox danger-full-access resume <thread_id> ... --json "Run one shell command: pwd"`
+  - Result: command execution succeeded (`/root`), no sandbox arg errors, no Landlock error.
+- Runtime/log paths:
+  - /root/.codex-discord-relay.env
+  - /root/.codex-discord-relay/instances.d/claude.env
+  - /root/.codex-discord-relay/relay.log
+  - /root/.codex-discord-relay/instances/claude/relay.log
+- Training status: no active training run in this task; latest epoch/metrics N/A.
+
+[2026-02-17T20:23:40+08:00] owner=codex objective=restore relay YOLO mode (task end)
+- Outcome: relay returned to YOLO mode (`danger-full-access` + no approval prompts) and restarted successfully.
+- Current run state:
+  - default relay running, provider=codex, sandbox=danger-full-access
+  - claude relay running, provider=claude, sandbox var aligned
+- Recommended immediate user validation in Discord:
+  1) In your existing thread, send: `@codex_agent run pwd and show output`.
+  2) If it succeeds, follow with your experiment command; no permission prompts should be needed.
+- Training status: no active training run in this task; latest epoch/metrics N/A.
+[2026-02-17T20:26:00+08:00] owner=codex objective=sync YOLO sandbox defaults into toolkit + commit/push (task start)
+- Objective: persist runtime-proven YOLO policy into toolkit defaults so future installs/restarts retain no-approval + danger-full-access behavior.
+- Target paths:
+  - /root/openclaw-codex-discord-skills-kit/config/setup.env.example
+  - /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/.env.example
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md
+  - /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
+- Training status: no active training run in this task; latest epoch/metrics N/A.
+[2026-02-17T20:28:10+08:00] owner=codex objective=sync YOLO sandbox defaults into toolkit + commit/push (major action)
+- Updated toolkit defaults to match runtime YOLO mode:
+  - config/setup.env.example: CODEX_SANDBOX=danger-full-access
+  - scripts/install_codex_discord_relay.sh: CODEX_SANDBOX default now danger-full-access
+  - codex-discord-relay/.env.example: CODEX_SANDBOX=danger-full-access
+  - codex-discord-relay/README.md: docs now reflect YOLO default and how to tighten to workspace-write.
+- Verification:
+  - bash -n scripts/install_codex_discord_relay.sh
+  - node --check codex-discord-relay/relay.js
+- Runtime note: live relay already updated in /root/.codex-discord-relay.env + restarted; this change makes installs persistent.
+- Training status: no active training run in this task; epoch/metrics N/A.

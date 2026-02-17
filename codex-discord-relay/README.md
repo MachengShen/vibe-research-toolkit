@@ -98,7 +98,7 @@ codex-discord-relay-multictl logs default
 - Agent context bootstrap is enabled by default. The relay injects runtime context into prompts so agents know they are replying via Discord and can request uploads with `[[upload:...]]`.
   Tune with `RELAY_CONTEXT_ENABLED`, `RELAY_CONTEXT_EVERY_TURN`, `RELAY_CONTEXT_VERSION`, `RELAY_CONTEXT_FILE`, `RELAY_CONTEXT_MAX_CHARS`, and `RELAY_CONTEXT_MAX_CHARS_PER_FILE`.
 - Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.
-- Keep `CODEX_SANDBOX=workspace-write` unless you intentionally need broader access.
+- Default `CODEX_SANDBOX=danger-full-access` matches the YOLO/no-permission flow; set it to `workspace-write` if you want tighter sandboxing.
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.

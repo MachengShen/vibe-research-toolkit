@@ -148,7 +148,8 @@ ensure_instance() {
     log "starting relay"
     (
       cd "$APP_DIR"
-      nohup "$NODE_BIN" "$APP_DIR/relay.js" --instance "$name" >>"$log_file" 2>&1 &
+      # Close lock fd 9 for the child so the watchdog lock is released when this script exits.
+      nohup "$NODE_BIN" "$APP_DIR/relay.js" --instance "$name" >>"$log_file" 2>&1 < /dev/null 9>&- &
       echo $! >"$pid_file"
     )
 
@@ -194,4 +195,3 @@ if [[ -d "$INSTANCES_ENV_DIR" ]]; then
 fi
 
 exit "$fail"
-

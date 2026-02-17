@@ -278,3 +278,104 @@ metrics: training_active=no epoch=n/a key_metrics=n/a
 [2026-02-17T14:39:57+08:00] owner=codex task_start objective="implement reproducibility additions, audit yesterday auto-sync script execution/effect, add root working memory + new system-context skill"
 - run/log paths (initial): repo=/root/openclaw-codex-discord-skills-kit handoff=/root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt root_handoff=/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
 - training state: inactive (no active training/epoch/metrics)
+[2026-02-17T14:46:58+08:00] owner=codex major_action objective="commit pre-existing pending edits before new feature work"
+- commit: 8ea4615 (chore: commit pending relay and gateway updates)
+- files: HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt, codex-discord-relay/.env.example, codex-discord-relay/README.md, codex-discord-relay/relay.js, system/openclaw-gateway-ensure.sh
+- run/log paths: repo=/root/openclaw-codex-discord-skills-kit
+- training state: inactive (no active training/epoch/metrics)
+[2026-02-17T15:47:12+08:00] Owner: Codex (GPT-5)
+Task update: synced relay watchdog lock fix into kit script for reproducibility.
+What changed: patched `system/codex-discord-relay-ensure-multi.sh` to close lock fd for child relay process (`9>&-`) so ensure-multi lock is not held permanently by running relay children on deployed hosts.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/system/codex-discord-relay-ensure-multi.sh ; /usr/local/bin/codex-discord-relay-ensure-multi.sh ; /tmp/codex-discord-relay-multi.lock
+Training status: inactive (epoch/metrics N/A)
+[2026-02-17T15:48:50+08:00] Owner: Codex (GPT-5)
+Major action: mirrored live relay no-approval/no-timeout updates into kit payload.
+Changed files:
+- codex-discord-relay/relay.js (add CLAUDE_ALLOWED_TOOLS parsing + --allowedTools args)
+- codex-discord-relay/README.md (document CLAUDE_ALLOWED_TOOLS)
+- system/codex-discord-relay-ensure-multi.sh (close lock fd for child process)
+Validation:
+- node --check codex-discord-relay/relay.js
+- bash -n system/codex-discord-relay-ensure-multi.sh
+Run/log paths: /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/system/codex-discord-relay-ensure-multi.sh
+Training status: inactive (epoch/metrics N/A)
+[2026-02-17T16:39:14+08:00] Owner: Codex (GPT-5)
+Task start: Mirror root agent overview into skills-kit global-context templates for new-machine parity.
+Objective: ensure template set includes AGENT_SYSTEM_OVERVIEW and references it from AGENTS/CLAUDE context files.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/templates/global-context/AGENTS.md ; /root/openclaw-codex-discord-skills-kit/templates/global-context/CLAUDE.md ; /root/openclaw-codex-discord-skills-kit/templates/global-context/AGENT_SYSTEM_OVERVIEW.md ; /root/openclaw-codex-discord-skills-kit/README.md ; /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
+Training status: inactive (epoch/metrics N/A)
+[2026-02-17T16:40:10+08:00] Owner: Codex (GPT-5)
+Major action: mirrored shared agent overview into skills-kit template set for bootstrap parity.
+Changes:
+- Added template file: templates/global-context/AGENT_SYSTEM_OVERVIEW.md
+- Updated templates/global-context/AGENTS.md key-path table with /root/AGENT_SYSTEM_OVERVIEW.md
+- Updated templates/global-context/CLAUDE.md key-path table with /root/AGENT_SYSTEM_OVERVIEW.md
+- Updated README copy commands to include AGENT_SYSTEM_OVERVIEW.md deployment
+Verification:
+- Template directory contains AGENTS.md, CLAUDE.md, AGENT_SYSTEM_OVERVIEW.md
+- Grep checks confirm new overview reference in AGENTS.md, CLAUDE.md, and README
+Run/log paths: /root/openclaw-codex-discord-skills-kit/templates/global-context/AGENT_SYSTEM_OVERVIEW.md ; /root/openclaw-codex-discord-skills-kit/templates/global-context/AGENTS.md ; /root/openclaw-codex-discord-skills-kit/templates/global-context/CLAUDE.md ; /root/openclaw-codex-discord-skills-kit/README.md ; /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
+Training status: inactive (epoch/metrics N/A)
+
+[2026-02-17T16:40:10+08:00] Owner: Codex (GPT-5)
+Task end: template parity update completed for agent onboarding docs.
+What changed: newly bootstrapped machines can now install the same concise overview doc alongside AGENTS/CLAUDE context templates.
+Current run state: documentation/template changes only; no service/runtime behavior changed.
+Next steps: if desired, add an automated bootstrap step that copies these templates by default.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/templates/global-context/AGENT_SYSTEM_OVERVIEW.md ; /root/openclaw-codex-discord-skills-kit/README.md
+Training status: inactive (epoch/metrics N/A)
+[2026-02-17T17:39:42+08:00] Owner: Codex (GPT-5)
+Task start: Wire bootstrap auto-copy for global context templates.
+Objective: make new-machine setup automatically seed AGENTS/CLAUDE/AGENT_SYSTEM_OVERVIEW with env-controlled toggles.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/bootstrap.sh ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/README.md
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T17:39:02+08:00] Owner: Codex (GPT-5)
+Task start: Wire bootstrap auto-copy for global context templates.
+Objective: make new-machine setup automatically seed AGENTS/CLAUDE/AGENT_SYSTEM_OVERVIEW with env-controlled toggles.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/bootstrap.sh ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/README.md
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T17:41:41+08:00] Owner: Codex (GPT-5)
+Major action: implemented bootstrap auto-install for global agent context templates with safe overwrite controls.
+Changes:
+- bootstrap.sh: added OPENCLAW_INSTALL_GLOBAL_CONTEXT (default true), OPENCLAW_GLOBAL_CONTEXT_OVERWRITE (default false), OPENCLAW_GLOBAL_CONTEXT_TARGET_HOME (default /root)
+- bootstrap.sh: added CLI flags --no-global-context and --global-context-overwrite
+- bootstrap.sh: installs templates/global-context/{AGENTS.md, CLAUDE.md, AGENT_SYSTEM_OVERVIEW.md} into target home paths with non-destructive default behavior
+- config/setup.env.example: documented new global context env toggles
+- README.md: documented default bootstrap auto-install behavior and related flags/env vars
+Verification:
+- bash -n /root/openclaw-codex-discord-skills-kit/bootstrap.sh
+- /root/openclaw-codex-discord-skills-kit/bootstrap.sh --help
+- rg checks for new flags and env vars in bootstrap.sh, config/setup.env.example, README.md
+Run/log paths: /root/openclaw-codex-discord-skills-kit/bootstrap.sh ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/README.md
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T17:41:41+08:00] Owner: Codex (GPT-5)
+Task end: bootstrap wiring for global context auto-copy completed.
+Current run state:
+- relay instances observed running via /usr/local/bin/codex-discord-relay-multictl list
+- default pid=56535
+- claude pid=56566
+Notes:
+- During this turn, an unquoted heredoc with backticks accidentally triggered command substitution and one unintended bootstrap.sh execution; corrective entries appended and subsequent logging used quoted/no-backtick format.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/SYSTEM_SETUP_WORKING_MEMORY.md ; /root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
+Training status: inactive (epoch/metrics N/A).
+2026-02-17T17:52:24+08:00 Owner: Codex (GPT-5)
+Task start: finalize requested focused commit and answer multi-agent non-interference mechanism question.
+Objective: commit remaining README docs for bootstrap global-context wiring and verify current relay/workdir/worktree isolation behavior.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/README.md ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T17:52:44+08:00] Owner: Codex (GPT-5)
+Major action: completed requested commit follow-up.
+- Commit created: 6ea73ef (docs: describe bootstrap global context defaults and flags)
+- Prior related commit already on main: f2e13c8 (bootstrap/env global-context wiring)
+- Files committed in this action: /root/openclaw-codex-discord-skills-kit/README.md
+- Isolation evidence reviewed:
+  - Relay keeps per-conversation sessions and queues requests per conversation.
+  - Relay supports per-conversation workdir command, but no filesystem-level locking between conversations.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/README.md ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T17:52:44+08:00] Owner: Codex (GPT-5)
+Task end: commit follow-up and multi-agent isolation assessment complete.
+Current run state: repository remains dirty from unrelated pre-existing files; targeted README commit is complete and isolated.
+Next steps: optionally enforce one-worktree-per-agent workflow (branch+worktree) to prevent cross-agent file contention.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/openclaw-codex-discord-skills-kit/.git
+Training status: inactive (epoch/metrics N/A).

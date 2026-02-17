@@ -91,6 +91,14 @@ function intEnv(name, fallback) {
   return Math.floor(n);
 }
 
+function parseToolList(value) {
+  if (!value) return [];
+  return String(value)
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function normalizeAgentProvider(value) {
   const v = String(value || "codex").trim().toLowerCase();
   return v === "claude" ? "claude" : "codex";
@@ -129,6 +137,7 @@ const CONFIG = {
   model: (process.env.CODEX_MODEL || "").trim(),
   claudeModel: (process.env.CLAUDE_MODEL || process.env.CODEX_MODEL || "").trim(),
   claudePermissionMode: resolveClaudePermissionMode(),
+  claudeAllowedTools: parseToolList(process.env.CLAUDE_ALLOWED_TOOLS || ""),
   agentTimeoutMs: Math.max(0, intEnv("RELAY_AGENT_TIMEOUT_MS", 10 * 60 * 1000)),
   sandbox: (process.env.CODEX_SANDBOX || "workspace-write").trim(),
   approvalPolicy: (
@@ -894,6 +903,7 @@ function buildClaudeArgs(session, prompt) {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (CONFIG.claudeModel) args.push("--model", CONFIG.claudeModel);
   if (CONFIG.claudePermissionMode) args.push("--permission-mode", CONFIG.claudePermissionMode);
+  if (CONFIG.claudeAllowedTools.length) args.push("--allowedTools", ...CONFIG.claudeAllowedTools);
   if (session.threadId) args.push("--resume", session.threadId);
   args.push(prompt);
   return args;

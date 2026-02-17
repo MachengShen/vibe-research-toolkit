@@ -42,6 +42,7 @@ CLAUDE_BIN=claude
 # optional:
 # CLAUDE_MODEL=sonnet
 # CLAUDE_PERMISSION_MODE=acceptEdits
+# CLAUDE_ALLOWED_TOOLS=Bash,Read,Glob,Grep,Write,Edit,NotebookEdit,TodoWrite,Task,TaskOutput,TaskStop,EnterPlanMode,ExitPlanMode,ToolSearch,AskUserQuestion,Skill,WebSearch,WebFetch
 # RELAY_AGENT_TIMEOUT_MS=900000
 ```
 
@@ -91,6 +92,7 @@ codex-discord-relay-multictl logs default
 - `RELAY_AGENT_PROVIDER=codex|claude` selects the backend.
 - `RELAY_AGENT_TIMEOUT_MS` controls max runtime per agent call (default `600000` ms, set `0` to disable).
 - `CLAUDE_PERMISSION_MODE=acceptEdits` is recommended when relay runs as root.
+- `CLAUDE_ALLOWED_TOOLS` can pre-allow specific Claude tools (comma or space separated) to avoid interactive approval prompts in relay flows.
 - Agent context bootstrap is enabled by default. The relay injects runtime context into prompts so agents know they are replying via Discord and can request uploads with `[[upload:...]]`.
   Tune with `RELAY_CONTEXT_ENABLED`, `RELAY_CONTEXT_EVERY_TURN`, `RELAY_CONTEXT_VERSION`, and optional `RELAY_CONTEXT_FILE`.
 - Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.

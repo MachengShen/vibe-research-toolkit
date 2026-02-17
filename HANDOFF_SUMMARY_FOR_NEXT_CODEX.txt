@@ -436,3 +436,41 @@ Training status: inactive (no active training run, epoch/metrics N/A).
   - /root/.codex-discord-relay/relay.log
   - /root/.codex-discord-relay/sessions.json
 - Training status: no active training run in this task; latest epoch/metrics N/A.
+[2026-02-17T20:16:35+08:00] owner=codex objective=discord relay smoke test + review + commit/push (major action)
+- Code-review pass completed on relay context-handoff feature set; found and fixed an additional correctness issue in total-budget accounting.
+- Additional patch applied:
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+    - `buildRelayContextArtifacts`: now counts inter-file separators toward `RELAY_CONTEXT_MAX_CHARS` budget.
+- Runtime sync + restart performed:
+  - /root/codex-discord-relay/relay.js synced from toolkit copy
+  - `codex-discord-relay-multictl restart all` (running pids after restart: default 64739->65219, claude 64770)
+- Verification commands:
+  - node --check /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+  - bash -n /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+  - bash -n /root/openclaw-codex-discord-skills-kit/scripts/init_repo_memory.sh
+- Commit + push:
+  - commit: a7fa5ddcd4002357742685523ef6f1f16c73b74a
+  - branch: main
+  - remote: origin/main (pushed)
+- Live smoke constraint:
+  - cannot self-generate non-bot Discord author traffic from this shell with available credentials; relay intentionally ignores bot authors (`message.author.bot`).
+  - relay runtime health confirmed via `/root/.codex-discord-relay/relay.log` and active process state.
+- Runtime/log paths:
+  - /root/.codex-discord-relay/relay.log
+  - /root/.codex-discord-relay/sessions.json
+  - /root/.codex-discord-relay/relay.pid
+- Training status: no active training run in this task; epoch/metrics N/A.
+
+[2026-02-17T20:16:35+08:00] owner=codex objective=discord relay smoke test + review + commit/push (task end)
+- Outcome: toolkit updates are synced, reviewed, committed, and pushed to remote for GPT Pro inspection.
+- Pushed commit includes:
+  - context spec list + workdir-relative resolution + mode truncation (`head/tail/headtail`)
+  - `/context` and `/context reload`
+  - codex resume arg compatibility fix (`--sandbox` binding + search override via config)
+  - per-file context budget + strict total budget accounting
+  - init script for repo memory files
+  - docs/env/bootstrap updates
+- Remaining operator step for full Discord E2E smoke:
+  1) in Discord, send `/context`, then `/context reload`, then one normal prompt in the target thread
+  2) check `/root/.codex-discord-relay/relay.log` for `agent.run.context_injected` and confirm expected behavior
+- Training status: no active training run in this task; epoch/metrics N/A.

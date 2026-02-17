@@ -16,6 +16,8 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/workdir /absolute/path`
   - `/attach <session_id>`
   - `/upload <path>`
+  - `/context`
+  - `/context reload`
   - `/help`
 
 ## Setup
@@ -94,7 +96,7 @@ codex-discord-relay-multictl logs default
 - `CLAUDE_PERMISSION_MODE=acceptEdits` is recommended when relay runs as root.
 - `CLAUDE_ALLOWED_TOOLS` can pre-allow specific Claude tools (comma or space separated) to avoid interactive approval prompts in relay flows.
 - Agent context bootstrap is enabled by default. The relay injects runtime context into prompts so agents know they are replying via Discord and can request uploads with `[[upload:...]]`.
-  Tune with `RELAY_CONTEXT_ENABLED`, `RELAY_CONTEXT_EVERY_TURN`, `RELAY_CONTEXT_VERSION`, and optional `RELAY_CONTEXT_FILE`.
+  Tune with `RELAY_CONTEXT_ENABLED`, `RELAY_CONTEXT_EVERY_TURN`, `RELAY_CONTEXT_VERSION`, `RELAY_CONTEXT_FILE`, `RELAY_CONTEXT_MAX_CHARS`, and `RELAY_CONTEXT_MAX_CHARS_PER_FILE`.
 - Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.
 - Keep `CODEX_SANDBOX=workspace-write` unless you intentionally need broader access.
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
@@ -119,13 +121,27 @@ Controls:
 - `RELAY_CONTEXT_ENABLED=true|false`
 - `RELAY_CONTEXT_EVERY_TURN=true|false` (default false)
 - `RELAY_CONTEXT_VERSION=<int>` (default `1`; bump to force re-bootstrap on existing sessions)
-- `RELAY_CONTEXT_FILE=/absolute/path/to/context.txt` (optional per-instance extra context)
+- `RELAY_CONTEXT_FILE=<spec1>;<spec2>;...` (optional per-instance extra context list)
+  - Prefix each spec with `head:`, `tail:`, or `headtail:`. If omitted, `head:` is used.
+  - Absolute paths are loaded directly.
+  - Relative paths resolve against the active session workdir (`/workdir`).
 - `RELAY_CONTEXT_MAX_CHARS=<int>` (default `6000`)
+- `RELAY_CONTEXT_MAX_CHARS_PER_FILE=<int>` (default `2000` in templates; runtime default falls back to total budget)
+
+Example:
+
+```bash
+RELAY_CONTEXT_FILE="/root/.codex-discord-relay/global-context.md;tail:docs/WORKING_MEMORY.md;tail:HANDOFF_LOG.md"
+RELAY_CONTEXT_MAX_CHARS=6000
+RELAY_CONTEXT_MAX_CHARS_PER_FILE=2000
+```
 
 Tips:
 
 - `/status` shows `context_bootstrap` state and current session context version.
-- After changing `RELAY_CONTEXT_FILE`, either bump `RELAY_CONTEXT_VERSION` or run `/reset` in Discord to apply immediately.
+- `/context` prints resolved context specs, file status, and estimated injected chars for the current workdir.
+- `/context reload` forces one-time context re-injection on the next user message without resetting the agent session.
+- After changing `RELAY_CONTEXT_FILE`, either bump `RELAY_CONTEXT_VERSION`, run `/context reload`, or run `/reset`.
 
 ## Progress Message Tuning
 

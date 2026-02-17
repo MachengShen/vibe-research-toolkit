@@ -379,3 +379,60 @@ Current run state: repository remains dirty from unrelated pre-existing files; t
 Next steps: optionally enforce one-worktree-per-agent workflow (branch+worktree) to prevent cross-agent file contention.
 Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/openclaw-codex-discord-skills-kit/.git
 Training status: inactive (epoch/metrics N/A).
+[2026-02-17T18:58:15+08:00] Owner: Codex (GPT-5)
+Task start: implement GPT-Pro relay upgrade spec in toolkit relay and scripts.
+Objective: patch relay runtime behavior, docs, env templates, and add init_repo_memory helper for per-repo working-memory + handoff artifacts.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh ; /root/openclaw-codex-discord-skills-kit/scripts/init_repo_memory.sh
+Training status: inactive (epoch/metrics N/A).
+[2026-02-17T19:47:43+08:00] Owner: Codex (GPT-5)
+Task start: audit unfinished Discord-requested relay pipeline modifications and complete/fix implementation per provided handoff spec.
+Objective: identify gaps vs spec, implement missing pieces safely, and verify behavior.
+Run/log paths: /root/openclaw-codex-discord-skills-kit/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh ; /root/openclaw-codex-discord-skills-kit/scripts/init_repo_memory.sh
+Training status: inactive (no active training run, epoch/metrics N/A).
+---
+[2026-02-17T19:59:36+08:00] owner=codex objective=discord relay context-handoff completion (major action)
+- Repo verification pass completed for handoff spec in /root/openclaw-codex-discord-skills-kit.
+- Confirmed and fixed two concrete issues:
+  1) tail-truncation bug in context injection (newest log entries could be dropped).
+  2) Codex resume arg parse failure (`unexpected argument --sandbox`) after previous arg-order refactor.
+- Patched files:
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+  - /root/codex-discord-relay/relay.js (synced runtime copy)
+- Validation commands run:
+  - node --check /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+  - bash -n /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+  - bash -n /root/openclaw-codex-discord-skills-kit/scripts/init_repo_memory.sh
+- Runtime/log paths:
+  - /root/.codex-discord-relay/relay.log
+  - /root/.codex-discord-relay/sessions.json
+  - /root/.codex-discord-relay/relay.pid
+- Relay process state after watchdog restart:
+  - default PID 53796
+  - claude PID 53839
+- Training status: no active training job in this task; latest epoch/metrics = N/A.
+
+[2026-02-17T19:59:36+08:00] owner=codex objective=discord relay context-handoff completion (task end)
+- Outcome: unfinished modification was taken over and completed to a runnable state.
+- Current behavior:
+  - Context multi-spec loading and workdir-relative resolution remain enabled.
+  - /context and /context reload remain implemented.
+  - resume invocation no longer fails on `--sandbox` parser error for current codex-cli.
+  - search toggle now uses config override (`-c features.web_search_request=true`) instead of unsupported `--search`.
+- Next operator check (Discord-side):
+  1) /workdir into a repo containing docs/WORKING_MEMORY.md and HANDOFF_LOG.md
+  2) send one message, then /context, then /context reload and send again
+  3) confirm latest handoff tail is visible after reload
+- Open risk:
+  - codex-cli flag semantics can change across versions; if upgraded, re-check `codex exec --help` and `codex exec resume --help`.
+- Training status: no active training job in this task; latest epoch/metrics = N/A.
+[2026-02-17T20:04:00+08:00] owner=codex objective=discord relay smoke test + review + commit/push (task start)
+- Objective: run live smoke test for context commands/bootstrapping, perform code-review style audit, then commit and push toolkit updates for GPT Pro inspection.
+- Planned run/log paths:
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js
+  - /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md
+  - /root/openclaw-codex-discord-skills-kit/config/setup.env.example
+  - /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+  - /root/openclaw-codex-discord-skills-kit/scripts/init_repo_memory.sh
+  - /root/.codex-discord-relay/relay.log
+  - /root/.codex-discord-relay/sessions.json
+- Training status: no active training run in this task; latest epoch/metrics N/A.

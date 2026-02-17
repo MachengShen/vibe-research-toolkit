@@ -91,6 +91,31 @@ function intEnv(name, fallback) {
   return Math.floor(n);
 }
 
+function parseContextSpecEntry(rawEntry) {
+  const raw = String(rawEntry || "").trim();
+  if (!raw) return null;
+  const match = raw.match(/^(headtail|head|tail):(.*)$/i);
+  if (!match) {
+    return { mode: "head", specPath: raw, rawSpec: raw };
+  }
+  const specPath = String(match[2] || "").trim();
+  if (!specPath) return null;
+  return {
+    mode: String(match[1] || "head").toLowerCase(),
+    specPath,
+    rawSpec: raw,
+  };
+}
+
+function parseContextSpecs(rawValue) {
+  const raw = String(rawValue || "");
+  if (!raw.trim()) return [];
+  return raw
+    .split(";")
+    .map((entry) => parseContextSpecEntry(entry))
+    .filter((entry) => Boolean(entry));
+}
+
 function parseToolList(value) {
   if (!value) return [];
   return String(value)
@@ -176,10 +201,11 @@ const CONFIG = {
   contextEveryTurn: boolEnv("RELAY_CONTEXT_EVERY_TURN", false),
   contextVersion: Math.max(1, intEnv("RELAY_CONTEXT_VERSION", 1)),
   contextMaxChars: Math.max(200, intEnv("RELAY_CONTEXT_MAX_CHARS", 6000)),
-  contextFile: (() => {
-    const raw = (process.env.RELAY_CONTEXT_FILE || "").trim();
-    return raw ? path.resolve(raw) : "";
-  })(),
+  contextMaxCharsPerFile: Math.max(
+    200,
+    intEnv("RELAY_CONTEXT_MAX_CHARS_PER_FILE", intEnv("RELAY_CONTEXT_MAX_CHARS", 6000))
+  ),
+  contextSpecs: parseContextSpecs(process.env.RELAY_CONTEXT_FILE || ""),
 
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
@@ -406,6 +432,26 @@ function splitMessage(text, maxLen) {
     idx = end;
   }
   return chunks;
+}
+
+function summarizeContextDiagnostic(diag) {
+  const spec = diag && diag.rawSpec ? diag.rawSpec : "(unknown)";
+  const resolved = diag && diag.resolvedPath ? diag.resolvedPath : "(unresolved)";
+  if (!diag || !diag.exists) {
+    const err = diag && diag.error ? ` error=${diag.error}` : "";
+    return `- ${spec} -> ${resolved} [missing${err}]`;
+  }
+  if (!diag.isFile) {
+    return `- ${spec} -> ${resolved} [not-file]`;
+  }
+  const parts = [
+    `size=${diag.size}`,
+    diag.mtimeIso ? `mtime=${diag.mtimeIso}` : null,
+    `loaded=${diag.loadedChars}`,
+    `injected=${diag.injectedChars || 0}`,
+    diag.truncated ? "truncated" : null,
+  ].filter(Boolean);
+  return `- ${spec} -> ${resolved} [${parts.join(" ")}]`;
 }
 
 function formatElapsed(ms) {
@@ -701,7 +747,7 @@ function extractPrompt(message, botUserId) {
 }
 
 function parseCommand(prompt) {
-  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload)\b(?:\s+([\s\S]+))?$/i);
+  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload|context)\b(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
   return {
     name: match[1].toLowerCase(),
@@ -722,17 +768,163 @@ function shouldInjectRelayContext(session) {
   return getSessionContextVersion(session) < CONFIG.contextVersion;
 }
 
-async function readRelayContextFile() {
-  if (!CONFIG.contextFile) return "";
-  try {
-    const raw = await fsp.readFile(CONFIG.contextFile, "utf8");
-    const trimmed = String(raw || "").trim();
-    if (!trimmed) return "";
-    if (trimmed.length <= CONFIG.contextMaxChars) return trimmed;
-    return `${trimmed.slice(0, CONFIG.contextMaxChars)}\n...[context truncated]`;
-  } catch {
-    return "";
+function resolveContextSpecPath(specPath, session) {
+  const baseWorkdir = session && session.workdir ? session.workdir : CONFIG.defaultWorkdir;
+  if (path.isAbsolute(specPath)) return path.resolve(specPath);
+  return path.resolve(baseWorkdir, specPath);
+}
+
+function truncateContextByMode(rawText, mode, maxChars) {
+  const text = String(rawText || "");
+  if (!text) return { text: "", truncated: false };
+  if (maxChars <= 0) return { text: "", truncated: text.length > 0 };
+  if (text.length <= maxChars) return { text, truncated: false };
+
+  const truncSuffix = "\n...[context truncated]";
+  const truncPrefix = "...[context truncated]\n";
+  const truncMiddleSuffix = "\n...[context truncated middle]";
+  const headTailJoiner = "\n...[snip]...\n";
+
+  // Keep oldest content for head mode and append a marker.
+  const truncateHead = () => {
+    if (truncSuffix.length >= maxChars) return truncSuffix.slice(0, maxChars);
+    const keep = Math.max(0, maxChars - truncSuffix.length);
+    return `${text.slice(0, keep)}${truncSuffix}`;
+  };
+
+  // Keep newest content for tail mode and prefix a marker.
+  const truncateTail = () => {
+    if (truncPrefix.length >= maxChars) return truncPrefix.slice(0, maxChars);
+    const keep = Math.max(0, maxChars - truncPrefix.length);
+    return `${truncPrefix}${text.slice(-keep)}`;
+  };
+
+  const truncateHeadTail = () => {
+    if (truncMiddleSuffix.length >= maxChars) return truncMiddleSuffix.slice(0, maxChars);
+    const bodyBudget = Math.max(0, maxChars - truncMiddleSuffix.length);
+    if (bodyBudget <= 0) return truncMiddleSuffix.slice(0, maxChars);
+
+    let body = "";
+    if (headTailJoiner.length >= bodyBudget) {
+      body = text.slice(0, bodyBudget);
+    } else {
+      const splitBudget = bodyBudget - headTailJoiner.length;
+      const headLen = Math.max(1, Math.floor(splitBudget / 2));
+      const tailLen = Math.max(1, splitBudget - headLen);
+      const head = text.slice(0, headLen);
+      const tail = text.slice(-tailLen);
+      body = `${head}${headTailJoiner}${tail}`;
+    }
+    if (body.length > bodyBudget) body = body.slice(0, bodyBudget);
+    return `${body}${truncMiddleSuffix}`;
+  };
+
+  if (mode === "tail") {
+    return {
+      text: truncateTail(),
+      truncated: true,
+    };
   }
+
+  if (mode === "headtail") {
+    return {
+      text: truncateHeadTail(),
+      truncated: true,
+    };
+  }
+
+  return {
+    text: truncateHead(),
+    truncated: true,
+  };
+}
+
+async function buildRelayContextArtifacts(session) {
+  const diagnostics = [];
+  if (!CONFIG.contextSpecs.length) {
+    return { text: "", diagnostics, injectedChars: 0, includedFiles: 0 };
+  }
+
+  for (const spec of CONFIG.contextSpecs) {
+    const resolvedPath = resolveContextSpecPath(spec.specPath, session);
+    const diag = {
+      rawSpec: spec.rawSpec,
+      mode: spec.mode,
+      configuredPath: spec.specPath,
+      resolvedPath,
+      exists: false,
+      isFile: false,
+      size: 0,
+      mtimeIso: "",
+      loadedChars: 0,
+      injectedChars: 0,
+      truncated: false,
+      error: "",
+      _text: "",
+    };
+    try {
+      const st = await fsp.stat(resolvedPath);
+      diag.exists = true;
+      diag.isFile = st.isFile();
+      diag.size = Number(st.size || 0);
+      diag.mtimeIso = st.mtime ? st.mtime.toISOString() : "";
+      if (!diag.isFile) {
+        diag.error = "not a file";
+        diagnostics.push(diag);
+        continue;
+      }
+      const raw = await fsp.readFile(resolvedPath, "utf8");
+      const trimmed = String(raw || "").trim();
+      diag.loadedChars = trimmed.length;
+      diag._text = trimmed;
+    } catch (err) {
+      diag.error = String(err && err.code ? err.code : err && err.message ? err.message : "read failed");
+    }
+    diagnostics.push(diag);
+  }
+
+  const withText = diagnostics.filter((diag) => diag._text && diag._text.length > 0);
+  const includeLabels = withText.length > 1;
+  const pieces = [];
+  let remaining = CONFIG.contextMaxChars;
+  let includedFiles = 0;
+
+  for (const diag of diagnostics) {
+    if (!diag._text) continue;
+    if (remaining <= 0) break;
+
+    const separator = pieces.length > 0 ? "\n\n" : "";
+    const separatorCost = separator.length;
+    if (remaining <= separatorCost) break;
+
+    const perFileBudget = Math.min(CONFIG.contextMaxCharsPerFile, remaining - separatorCost);
+    if (perFileBudget <= 0) break;
+
+    const label = includeLabels
+      ? `### Context file: ${diag.rawSpec} (resolved: ${diag.resolvedPath})\n`
+      : "";
+    const textBudget = Math.max(0, perFileBudget - label.length);
+    if (textBudget <= 0) continue;
+
+    const truncated = truncateContextByMode(diag._text, diag.mode, textBudget);
+    if (!truncated.text) continue;
+
+    const chunk = `${label}${truncated.text}`;
+    diag.truncated = truncated.truncated;
+    diag.injectedChars = chunk.length;
+    pieces.push(`${separator}${chunk}`);
+    remaining -= separatorCost + chunk.length;
+    includedFiles += 1;
+  }
+
+  for (const diag of diagnostics) delete diag._text;
+  const text = pieces.join("");
+  return {
+    text,
+    diagnostics,
+    injectedChars: text.length,
+    includedFiles,
+  };
 }
 
 function buildRelayRuntimeContext(meta) {
@@ -746,7 +938,7 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
   ];
   if (CONFIG.uploadEnabled) {
@@ -768,37 +960,48 @@ function buildRelayRuntimeContext(meta) {
 
 async function buildAgentPrompt(session, userPrompt, meta) {
   if (!shouldInjectRelayContext(session)) {
-    return { prompt: userPrompt, contextInjected: false };
+    return { prompt: userPrompt, contextInjected: false, contextMeta: null };
   }
   const runtimeContext = buildRelayRuntimeContext({ ...meta, session });
-  const extraContext = await readRelayContextFile();
+  const contextArtifacts = await buildRelayContextArtifacts(session);
+  const extraContext = contextArtifacts.text;
   const contextBlock = extraContext
     ? `${runtimeContext}\n\nInstance-specific context:\n${extraContext}`
     : runtimeContext;
   const prompt = ["[Relay Runtime Context]", contextBlock, "", "[User Message]", userPrompt].join("\n");
-  return { prompt, contextInjected: true };
+  return { prompt, contextInjected: true, contextMeta: contextArtifacts };
 }
 
 function buildCodexArgs(session, prompt) {
-  const args = [];
-  if (CONFIG.approvalPolicy) {
-    // Codex CLI doesn't expose an approval flag; set it through config.
-    args.push("-c", `approval_policy=${JSON.stringify(CONFIG.approvalPolicy)}`);
-  }
-  if (CONFIG.sandbox) args.push("--sandbox", CONFIG.sandbox);
-  if (CONFIG.model) args.push("--model", CONFIG.model);
-  if (CONFIG.enableSearch) args.push("--search");
-  for (const override of CONFIG.configOverrides) {
-    args.push("-c", override);
-  }
-  args.push("exec");
+  const args = ["exec"];
+
+  const appendSharedFlags = () => {
+    if (CONFIG.approvalPolicy) {
+      // Codex CLI doesn't expose an approval flag; set it through config.
+      args.push("-c", `approval_policy=${JSON.stringify(CONFIG.approvalPolicy)}`);
+    }
+    if (CONFIG.model) args.push("--model", CONFIG.model);
+    // Newer codex-cli builds no longer expose `--search` for `exec`.
+    // Keep CODEX_ENABLE_SEARCH behavior via config override instead.
+    if (CONFIG.enableSearch) args.push("-c", "features.web_search_request=true");
+    for (const override of CONFIG.configOverrides) {
+      args.push("-c", override);
+    }
+  };
+
   if (session.threadId) {
-    args.push("resume");
+    // For nested `exec resume`, `--sandbox` must be bound to `exec` (before `resume`).
+    if (CONFIG.sandbox) args.push("--sandbox", CONFIG.sandbox);
+    args.push("resume", session.threadId);
     if (CONFIG.skipGitRepoCheck) args.push("--skip-git-repo-check");
-    args.push(session.threadId, "--json", prompt);
+    appendSharedFlags();
+    args.push("--json", prompt);
   } else {
     if (CONFIG.skipGitRepoCheck) args.push("--skip-git-repo-check");
-    args.push("--cd", session.workdir || CONFIG.defaultWorkdir, "--json", prompt);
+    args.push("--cd", session.workdir || CONFIG.defaultWorkdir);
+    if (CONFIG.sandbox) args.push("--sandbox", CONFIG.sandbox);
+    appendSharedFlags();
+    args.push("--json", prompt);
   }
   return args;
 }
@@ -1037,6 +1240,8 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/workdir <absolute_path>` - set workdir (resets thread)",
         `\`/attach <session_id>\` - attach this Discord context to an existing ${AGENT_LABEL} session (DM-only by default)`,
         "`/upload <path>` - upload an image from this conversation's upload directory",
+        "`/context` - show context bootstrap diagnostics for this conversation",
+        "`/context reload` - force context re-bootstrap on next message",
       ].join("\n")
     );
     return true;
@@ -1054,6 +1259,40 @@ async function handleCommand(message, session, command, conversationKey) {
         `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
       ].join("\n")
     );
+    return true;
+  }
+
+  if (command.name === "context") {
+    const sub = command.arg.toLowerCase();
+    if (sub === "reload") {
+      session.contextVersion = 0;
+      session.updatedAt = new Date().toISOString();
+      await queueSaveState();
+      await message.reply("Context reload queued. Next message will re-inject context.");
+      return true;
+    }
+    if (sub) {
+      await message.reply("Usage: `/context` or `/context reload`");
+      return true;
+    }
+
+    const artifacts = await buildRelayContextArtifacts(session);
+    const specList = CONFIG.contextSpecs.map((spec) => spec.rawSpec).join("; ");
+    const lines = [
+      `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${getSessionContextVersion(session)}`,
+      `context_limits: total=${CONFIG.contextMaxChars} per_file=${CONFIG.contextMaxCharsPerFile}`,
+      `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
+      `configured_specs: ${specList || "(none)"}`,
+      `injection_preview: chars=${artifacts.injectedChars} files=${artifacts.includedFiles}`,
+    ];
+    if (artifacts.diagnostics.length === 0) {
+      lines.push("- no context file specs configured");
+    } else {
+      for (const diag of artifacts.diagnostics) {
+        lines.push(summarizeContextDiagnostic(diag));
+      }
+    }
+    await sendLongReply(message, lines.join("\n"));
     return true;
   }
 
@@ -1262,13 +1501,27 @@ async function main() {
             });
             contextInjected = firstPrompt.contextInjected;
             if (firstPrompt.contextInjected) {
+              const injectedChars =
+                firstPrompt.contextMeta && typeof firstPrompt.contextMeta.injectedChars === "number"
+                  ? firstPrompt.contextMeta.injectedChars
+                  : 0;
+              const includedFiles =
+                firstPrompt.contextMeta && typeof firstPrompt.contextMeta.includedFiles === "number"
+                  ? firstPrompt.contextMeta.includedFiles
+                  : 0;
               logRelayEvent("agent.run.context_injected", {
                 conversationKey: key,
                 provider: CONFIG.agentProvider,
                 sessionId: session.threadId || null,
                 contextVersion: CONFIG.contextVersion,
+                contextChars: injectedChars,
+                contextFiles: includedFiles,
               });
-              progress.note("Loaded relay runtime context");
+              progress.note(
+                includedFiles > 0
+                  ? `Loaded relay runtime context (+${includedFiles} context file${includedFiles === 1 ? "" : "s"})`
+                  : "Loaded relay runtime context"
+              );
             }
             result = await runAgent(
               session,

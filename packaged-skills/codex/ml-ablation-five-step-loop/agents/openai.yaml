@@ -1,0 +1,4 @@
+interface:
+  display_name: "ML Ablation Five-Step Loop"
+  short_description: "Run multi-phase ML ablations with monitor-gated adaptive redesign"
+  default_prompt: "Use $ml-ablation-five-step-loop to run a structured 5-phase ablation: sanity gate, then Phase A/B/C hyperparameter sweeps, then a reflection summary. Assess and redesign between phases using the MARR framework."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ML Run Monitor Decider"
+  short_description: "Launch, monitor, and make stop/go decisions on ML training runs"
+  default_prompt: "Use $ml-run-monitor-decider to snapshot GPU state, launch controlled experiments one variable at a time, monitor on a fixed cadence, and make explicit continue/stop/branch decisions after each checkpoint window."

@@ -52,11 +52,13 @@ Bootstrap installs:
 - `/usr/local/bin/codex-discord-relay-ensure-multi.sh`
 - `/usr/local/bin/codex-discord-relay-multictl`
 - `/usr/local/bin/openclaw-kit-autoupdate.sh`
+- `/etc/cron.d/openclaw-state-sync` (optional; only when `OPENCLAW_STATE_SYNC_CRON_ENABLED=true`)
 - `/etc/systemd/system/openclaw-kit-autoupdate.service`
 - `/etc/systemd/system/openclaw-kit-autoupdate.timer`
 - Cron entries for gateway + relay ensure scripts (`@reboot` + periodic ensure)
 - Proxy env at `/root/.openclaw/proxy.env` (or `$OPENCLAW_STATE_DIR/proxy.env`) sourced by ensure scripts and autoupdate script
 - Packaged custom skills from `packaged-skills/codex/*` installed into `$CODEX_HOME/skills` (default `~/.codex/skills`)
+- Optional machine-state snapshot under `machine-state/` for reproducible host migration
 
 Relay multi-instance state layout:
 
@@ -97,7 +99,39 @@ cat /etc/cron.d/openclaw-kit-autoupdate
 # Packaged skills:
 bash ./scripts/install_packaged_skills.sh --list
 ls -la "${CODEX_HOME:-$HOME/.codex}/skills"
+
+# Full verification:
+bash ./scripts/verify_install.sh
+
+# Export current host settings into repo snapshot (safe/redacted):
+bash ./scripts/export_local_state.sh --no-secrets
+
+# Apply snapshot onto a fresh machine:
+sudo bash ./scripts/apply_local_state.sh --no-secrets
+
+# One-shot machine -> repo sync + commit:
+bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push false
 ```
+
+## Global Agent Context Templates
+
+Templates for global context files that every agent reads automatically. Copy to the correct location on a new machine:
+
+```bash
+# For Claude (reads ~/.claude/CLAUDE.md on every session)
+cp templates/global-context/CLAUDE.md ~/.claude/CLAUDE.md
+
+# For Codex (reads ~/AGENTS.md on every session)
+cp templates/global-context/AGENTS.md ~/AGENTS.md
+```
+
+These files tell both agents about:
+- Speech-to-text phonetic error tolerance
+- The dual-agent ecosystem (Claude + Codex) and skill paths
+- Global work log / handoff log policy
+- Relay infrastructure and key paths
+
+Edit after copying to adjust any machine-specific paths.
 
 ## Packaged Skills
 
@@ -107,6 +141,11 @@ This repo bundles reusable local skills under:
 - `packaged-skills/codex/discord-image-upload`
 - `packaged-skills/codex/openclaw-media-send`
 - `packaged-skills/codex/periodic-mechanistic-service`
+- `packaged-skills/codex/system-setup-context-awareness`
+- `packaged-skills/codex/ml-run-monitor-decider`
+- `packaged-skills/codex/experiment-working-memory-handoff`
+- `packaged-skills/codex/gpu-training-takeover`
+- `packaged-skills/codex/ml-ablation-five-step-loop`
 
 Install/update bundled skills with one command:
 
@@ -141,6 +180,40 @@ Example cadences:
 
 - Daily: `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=daily`
 - Every 3 days (03:00): `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=*-*-1,4,7,10,13,16,19,22,25,28 03:00:00`
+
+## Machine-State Sync (Settings Back To Repo)
+
+`openclaw-kit-autoupdate.sh` updates this host from git and re-runs deployment scripts.  
+It does **not** push local machine settings back into the repository.
+
+For machine -> repo sync, use:
+
+```bash
+# Redacted snapshot + local skill packaging + commit
+bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push false
+```
+
+To automate this direction, enable cron fallback in `config/setup.env`:
+
+- `OPENCLAW_STATE_SYNC_CRON_ENABLED=true`
+- `OPENCLAW_STATE_SYNC_CRON=12 * * * *` (example)
+
+Then run bootstrap (or directly run `scripts/install_local_state_sync_cron.sh`).
+
+## Bootstrap Secrets Mode
+
+Bootstrap supports explicit snapshot-secret mode:
+
+```bash
+sudo ./bootstrap.sh --no-secrets
+sudo ./bootstrap.sh --with-secrets
+```
+
+Related env toggles:
+
+- `OPENCLAW_APPLY_SNAPSHOT_ON_BOOTSTRAP=true|false`
+- `OPENCLAW_EXPORT_SNAPSHOT_ON_BOOTSTRAP=true|false`
+- `OPENCLAW_SYNC_LOCAL_SKILLS_ON_BOOTSTRAP=true|false`
 
 ## Relay Stall Triage (Quick)
 

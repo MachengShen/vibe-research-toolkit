@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPU Training Takeover"
+  short_description: "Inherit and continue an in-flight GPU training experiment stream"
+  default_prompt: "Use $gpu-training-takeover to snapshot current GPU/job state, validate resume assumptions, launch through the project queue gate, monitor at appropriate cadence, and log one concise handoff block per major action."

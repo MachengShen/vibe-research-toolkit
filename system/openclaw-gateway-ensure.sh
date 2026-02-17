@@ -8,9 +8,10 @@ START_LOG="${OPENCLAW_START_LOG:-$OPENCLAW_STATE_DIR/log/gateway-autostart.log}"
 RUNTIME_LOG="${OPENCLAW_RUNTIME_LOG:-$OPENCLAW_STATE_DIR/log/manual-gateway.log}"
 PROXY_ENV_FILE="${OPENCLAW_PROXY_ENV_FILE:-$OPENCLAW_STATE_DIR/proxy.env}"
 DISCORD_GATEWAY_PROXY_DEFAULT="${DISCORD_GATEWAY_PROXY_DEFAULT:-http://127.0.0.1:7897}"
+OPENCLAW_NODE_OPTIONS="${OPENCLAW_NODE_OPTIONS:-}"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-NVM_BIN="$(ls -1 /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -n 1 || true)"
+NVM_BIN="$(ls -d1 /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -n 1 || true)"
 if [ -n "$NVM_BIN" ] && [ -d "$NVM_BIN" ]; then
   PATH="$NVM_BIN:$PATH"
 fi
@@ -64,6 +65,11 @@ fi
 
 DISCORD_GATEWAY_PROXY="${DISCORD_GATEWAY_PROXY:-${HTTP_PROXY:-$DISCORD_GATEWAY_PROXY_DEFAULT}}"
 
+NODE_OPTIONS_ARGS=()
+if [ -n "$OPENCLAW_NODE_OPTIONS" ]; then
+  NODE_OPTIONS_ARGS=(NODE_OPTIONS="$OPENCLAW_NODE_OPTIONS")
+fi
+
 echo "[$(timestamp)] gateway down; starting with persistent proxy env (http: ${HTTP_PROXY:-none}, discord: $DISCORD_GATEWAY_PROXY)" >>"$START_LOG"
 setsid -f env \
   HTTP_PROXY="${HTTP_PROXY:-}" \
@@ -71,7 +77,7 @@ setsid -f env \
   ALL_PROXY="${ALL_PROXY:-}" \
   NO_PROXY="${NO_PROXY:-}" \
   DISCORD_GATEWAY_PROXY="$DISCORD_GATEWAY_PROXY" \
-  NODE_OPTIONS="--no-network-family-autoselection" \
+  "${NODE_OPTIONS_ARGS[@]}" \
   "$OPENCLAW_BIN" gateway run --force --verbose >>"$RUNTIME_LOG" 2>&1
 
 sleep 3

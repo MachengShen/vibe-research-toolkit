@@ -41,7 +41,7 @@ RELAY_AGENT_PROVIDER=claude
 CLAUDE_BIN=claude
 # optional:
 # CLAUDE_MODEL=sonnet
-# CLAUDE_PERMISSION_MODE=default
+# CLAUDE_PERMISSION_MODE=acceptEdits
 # RELAY_AGENT_TIMEOUT_MS=900000
 ```
 
@@ -90,6 +90,9 @@ codex-discord-relay-multictl logs default
 
 - `RELAY_AGENT_PROVIDER=codex|claude` selects the backend.
 - `RELAY_AGENT_TIMEOUT_MS` controls max runtime per agent call (default `600000` ms, set `0` to disable).
+- `CLAUDE_PERMISSION_MODE=acceptEdits` is recommended when relay runs as root.
+- Agent context bootstrap is enabled by default. The relay injects runtime context into prompts so agents know they are replying via Discord and can request uploads with `[[upload:...]]`.
+  Tune with `RELAY_CONTEXT_ENABLED`, `RELAY_CONTEXT_EVERY_TURN`, `RELAY_CONTEXT_VERSION`, and optional `RELAY_CONTEXT_FILE`.
 - Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.
 - Keep `CODEX_SANDBOX=workspace-write` unless you intentionally need broader access.
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
@@ -99,6 +102,28 @@ codex-discord-relay-multictl logs default
 - If Discord is blocked on your network, the relay supports proxies via `DISCORD_GATEWAY_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`.
   It will also automatically source `/root/.openclaw/proxy.env` when starting (same proxy config used by OpenClaw).
 - `/attach` is **DM-only by default**. Set `RELAY_ATTACH_ALLOW_GUILDS=true` if you intentionally want to allow attaching sessions in guild channels.
+
+## Agent Context Bootstrap
+
+By default, the relay prepends a small runtime context block before forwarding a user prompt to Codex/Claude. This makes agents aware of:
+
+- They are being used via Discord relay
+- Replies are routed back to Discord
+- Upload marker syntax (`[[upload:path]]`) for attachments
+- Slash-command boundaries (`/status`, `/reset`, etc. are user-side)
+
+Controls:
+
+- `RELAY_CONTEXT_ENABLED=true|false`
+- `RELAY_CONTEXT_EVERY_TURN=true|false` (default false)
+- `RELAY_CONTEXT_VERSION=<int>` (default `1`; bump to force re-bootstrap on existing sessions)
+- `RELAY_CONTEXT_FILE=/absolute/path/to/context.txt` (optional per-instance extra context)
+- `RELAY_CONTEXT_MAX_CHARS=<int>` (default `6000`)
+
+Tips:
+
+- `/status` shows `context_bootstrap` state and current session context version.
+- After changing `RELAY_CONTEXT_FILE`, either bump `RELAY_CONTEXT_VERSION` or run `/reset` in Discord to apply immediately.
 
 ## Progress Message Tuning
 

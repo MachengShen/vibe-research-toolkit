@@ -96,6 +96,15 @@ function normalizeAgentProvider(value) {
   return v === "claude" ? "claude" : "codex";
 }
 
+function resolveClaudePermissionMode() {
+  const explicit = (process.env.CLAUDE_PERMISSION_MODE || "").trim();
+  if (explicit) return explicit;
+  // Claude's "bypassPermissions" mode maps to a dangerous flag that is blocked under root.
+  // Default to acceptEdits when relay runs as root to avoid silent hangs/failures.
+  if (typeof process.getuid === "function" && process.getuid() === 0) return "acceptEdits";
+  return "";
+}
+
 const ALLOWED_GUILDS = parseCsv(process.env.DISCORD_ALLOWED_GUILDS || "");
 const ALLOWED_CHANNELS = parseCsv(process.env.DISCORD_ALLOWED_CHANNELS || "");
 
@@ -119,7 +128,7 @@ const CONFIG = {
   })(),
   model: (process.env.CODEX_MODEL || "").trim(),
   claudeModel: (process.env.CLAUDE_MODEL || process.env.CODEX_MODEL || "").trim(),
-  claudePermissionMode: (process.env.CLAUDE_PERMISSION_MODE || "").trim(),
+  claudePermissionMode: resolveClaudePermissionMode(),
   agentTimeoutMs: Math.max(0, intEnv("RELAY_AGENT_TIMEOUT_MS", 10 * 60 * 1000)),
   sandbox: (process.env.CODEX_SANDBOX || "workspace-write").trim(),
   approvalPolicy: (
@@ -153,10 +162,35 @@ const CONFIG = {
   })(),
   uploadMaxFiles: Math.max(0, intEnv("RELAY_UPLOAD_MAX_FILES", 3)),
   uploadMaxBytes: Math.max(0, intEnv("RELAY_UPLOAD_MAX_BYTES", 8 * 1024 * 1024)),
+
+  contextEnabled: boolEnv("RELAY_CONTEXT_ENABLED", true),
+  contextEveryTurn: boolEnv("RELAY_CONTEXT_EVERY_TURN", false),
+  contextVersion: Math.max(1, intEnv("RELAY_CONTEXT_VERSION", 1)),
+  contextMaxChars: Math.max(200, intEnv("RELAY_CONTEXT_MAX_CHARS", 6000)),
+  contextFile: (() => {
+    const raw = (process.env.RELAY_CONTEXT_FILE || "").trim();
+    return raw ? path.resolve(raw) : "";
+  })(),
+
+  progressEnabled: boolEnv("RELAY_PROGRESS", true),
+  progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
+  progressHeartbeatMs: Math.max(1000, intEnv("RELAY_PROGRESS_HEARTBEAT_MS", 20000)),
+  progressMaxLines: Math.max(1, intEnv("RELAY_PROGRESS_MAX_LINES", 6)),
+  progressShowCommands: boolEnv("RELAY_PROGRESS_SHOW_COMMANDS", false),
 };
 
 const AGENT_LABEL = CONFIG.agentProvider === "claude" ? "Claude" : "Codex";
 const AGENT_SESSION_LABEL = CONFIG.agentProvider === "claude" ? "session_id" : "thread_id";
+
+if (
+  CONFIG.agentProvider === "claude" &&
+  !process.env.CLAUDE_PERMISSION_MODE &&
+  CONFIG.claudePermissionMode === "acceptEdits"
+) {
+  console.warn(
+    "CLAUDE_PERMISSION_MODE not set; defaulting to acceptEdits because relay is running as root."
+  );
+}
 
 if (!CONFIG.token) {
   console.error("DISCORD_BOT_TOKEN is required.");
@@ -164,6 +198,23 @@ if (!CONFIG.token) {
 }
 
 if (!process.env.RELAY_UPLOAD_ROOT_DIR) process.env.RELAY_UPLOAD_ROOT_DIR = CONFIG.uploadRootDir;
+
+function logRelayEvent(event, meta = {}) {
+  try {
+    console.log(
+      JSON.stringify({
+        subsystem: "relay-runtime",
+        event,
+        at: new Date().toISOString(),
+        ...meta,
+      })
+    );
+  } catch {
+    try {
+      console.log(`[relay-runtime] ${event}`);
+    } catch {}
+  }
+}
 
 const state = {
   version: 1,
@@ -348,6 +399,268 @@ function splitMessage(text, maxLen) {
   return chunks;
 }
 
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+function cleanProgressText(value, maxChars = 160) {
+  let text = String(value || "");
+  if (!text) return "";
+  text = text.replace(/\r?\n+/g, " ");
+  text = text.replace(/`+/g, "");
+  text = text.replace(/\*\*/g, "");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1)}…`;
+}
+
+function humanizeStepType(value) {
+  const raw = cleanProgressText(value, 80).toLowerCase();
+  if (!raw) return "step";
+  return raw.replace(/[_-]+/g, " ");
+}
+
+function commandPreview(command) {
+  const raw = cleanProgressText(command, 140);
+  if (!raw) return "";
+  if (CONFIG.progressShowCommands) return raw;
+  const firstToken = raw.split(/\s+/)[0] || "";
+  return path.basename(firstToken) || "";
+}
+
+function emitProgress(onProgress, text) {
+  if (typeof onProgress !== "function") return;
+  const cleaned = cleanProgressText(text, 180);
+  if (!cleaned) return;
+  try {
+    onProgress(cleaned);
+  } catch {}
+}
+
+function summarizeCodexItemProgress(item, phase) {
+  if (!item || typeof item !== "object") return null;
+  const kind = String(item.type || "")
+    .trim()
+    .toLowerCase();
+  if (!kind || kind === "agent_message") return null;
+
+  if (kind === "reasoning") {
+    if (phase === "completed" && typeof item.text === "string") {
+      const thought = cleanProgressText(item.text, 140);
+      if (thought) return `Thinking: ${thought}`;
+    }
+    return phase === "started" ? "Thinking" : null;
+  }
+
+  if (kind === "command_execution") {
+    const preview = commandPreview(item.command);
+    if (phase === "started" || item.status === "in_progress") {
+      if (CONFIG.progressShowCommands && preview) return `Running shell command: ${preview}`;
+      if (preview) return `Running shell command (${preview})`;
+      return "Running shell command";
+    }
+    const exitCode =
+      item.exit_code == null || item.exit_code === "" ? "" : ` (exit ${String(item.exit_code)})`;
+    return `Shell command finished${exitCode}`;
+  }
+
+  if (kind === "file_change") {
+    return phase === "started" ? "Updating files" : "Finished updating files";
+  }
+
+  const label = humanizeStepType(kind);
+  return phase === "started" ? `Working on ${label}` : `Completed ${label}`;
+}
+
+function summarizeCodexProgressEvent(evt) {
+  if (!evt || typeof evt !== "object") return null;
+  if (evt.type === "thread.started") {
+    if (typeof evt.thread_id === "string" && evt.thread_id) {
+      return `Session started (${evt.thread_id})`;
+    }
+    return "Session started";
+  }
+  if (evt.type === "turn.started") return "Analyzing request";
+  if (evt.type === "turn.completed") return "Preparing final response";
+  if (evt.type === "item.started") return summarizeCodexItemProgress(evt.item, "started");
+  if (evt.type === "item.completed") return summarizeCodexItemProgress(evt.item, "completed");
+  return null;
+}
+
+function summarizeClaudeProgressEvent(evt, toolNamesById) {
+  if (!evt || typeof evt !== "object") return null;
+  const type = String(evt.type || "").toLowerCase();
+
+  if (type === "system" && evt.subtype === "init") {
+    if (typeof evt.session_id === "string" && evt.session_id) {
+      return `Session started (${evt.session_id})`;
+    }
+    return "Session started";
+  }
+
+  if (type === "assistant") {
+    const msg = evt.message && typeof evt.message === "object" ? evt.message : null;
+    const content = msg && Array.isArray(msg.content) ? msg.content : [];
+    let thinkingLine = null;
+
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "tool_use") {
+        const toolName = cleanProgressText(part.name || "tool", 40) || "tool";
+        if (typeof part.id === "string" && part.id) {
+          toolNamesById.set(part.id, toolName);
+        }
+        if (
+          CONFIG.progressShowCommands &&
+          toolName.toLowerCase() === "bash" &&
+          part.input &&
+          typeof part.input.command === "string"
+        ) {
+          const cmd = cleanProgressText(part.input.command, 120);
+          if (cmd) return `Running tool: ${toolName} (${cmd})`;
+        }
+        if (part.input && typeof part.input.description === "string") {
+          const desc = cleanProgressText(part.input.description, 90);
+          if (desc) return `Running tool: ${toolName} (${desc})`;
+        }
+        return `Running tool: ${toolName}`;
+      }
+      if (part.type === "text" && !thinkingLine && typeof part.text === "string") {
+        const text = cleanProgressText(part.text, 140);
+        if (text && text.length >= 16 && !/^(ok|done|yes|no)$/i.test(text)) {
+          thinkingLine = `Thinking: ${text}`;
+        }
+      }
+    }
+
+    return thinkingLine;
+  }
+
+  if (type === "user") {
+    const msg = evt.message && typeof evt.message === "object" ? evt.message : null;
+    const content = msg && Array.isArray(msg.content) ? msg.content : [];
+    for (const part of content) {
+      if (!part || typeof part !== "object" || part.type !== "tool_result") continue;
+      const toolId = typeof part.tool_use_id === "string" ? part.tool_use_id : "";
+      const toolName = cleanProgressText(toolNamesById.get(toolId) || "tool", 40) || "tool";
+      return part.is_error ? `Tool failed: ${toolName}` : `Tool finished: ${toolName}`;
+    }
+    return null;
+  }
+
+  if (type === "result") return "Preparing final response";
+  return null;
+}
+
+function createProgressReporter(pendingMsg, conversationKey) {
+  if (!CONFIG.progressEnabled || !pendingMsg || typeof pendingMsg.edit !== "function") {
+    return {
+      note() {},
+      async stop() {},
+    };
+  }
+
+  const startedAt = Date.now();
+  const maxLines = Math.max(1, CONFIG.progressMaxLines);
+  const keepLines = Math.max(maxLines * 3, maxLines);
+  const minEditMs = Math.max(500, CONFIG.progressMinEditMs);
+  const heartbeatMs = Math.max(minEditMs, CONFIG.progressHeartbeatMs);
+  const lines = [];
+
+  let dirty = true;
+  let stopped = false;
+  let lastEditAt = 0;
+  let lastRendered = "";
+  let delayedFlushTimer = null;
+  let editChain = Promise.resolve();
+
+  function render() {
+    const elapsed = formatElapsed(Date.now() - startedAt);
+    const header = `Running ${AGENT_LABEL}... (elapsed ${elapsed})`;
+    const visible = lines.slice(-maxLines);
+    if (visible.length === 0) return header;
+    return `${header}\n${visible.map((line) => `- ${line}`).join("\n")}`;
+  }
+
+  function queueFlush(force = false) {
+    if (stopped) return;
+    editChain = editChain
+      .catch(() => {})
+      .then(async () => {
+        if (stopped) return;
+        const now = Date.now();
+        const since = now - lastEditAt;
+        const dueHeartbeat = since >= heartbeatMs;
+        const dueDirty = dirty && since >= minEditMs;
+        if (!force && !dueHeartbeat && !dueDirty) return;
+
+        const content = render();
+        if (content === lastRendered && !dueHeartbeat && !force) return;
+
+        try {
+          await pendingMsg.edit(content);
+          lastRendered = content;
+          lastEditAt = Date.now();
+          dirty = false;
+        } catch (err) {
+          logRelayEvent("progress.edit.error", {
+            conversationKey,
+            provider: CONFIG.agentProvider,
+            error: String(err && err.message ? err.message : err).slice(0, 240),
+          });
+        }
+      });
+  }
+
+  function scheduleDelayedFlush() {
+    if (stopped || delayedFlushTimer) return;
+    const waitMs = Math.max(0, minEditMs - (Date.now() - lastEditAt));
+    delayedFlushTimer = setTimeout(() => {
+      delayedFlushTimer = null;
+      queueFlush(false);
+    }, waitMs);
+  }
+
+  function note(text) {
+    if (stopped) return;
+    const cleaned = cleanProgressText(text, 180);
+    if (!cleaned) return;
+    if (lines[lines.length - 1] === cleaned) return;
+    lines.push(cleaned);
+    if (lines.length > keepLines) lines.splice(0, lines.length - keepLines);
+    dirty = true;
+
+    if (Date.now() - lastEditAt >= minEditMs) queueFlush(false);
+    else scheduleDelayedFlush();
+  }
+
+  const heartbeatTick = setInterval(() => {
+    queueFlush(false);
+  }, Math.max(1000, Math.min(minEditMs, 5000)));
+
+  note("Queued request");
+  queueFlush(true);
+
+  return {
+    note,
+    stop: async () => {
+      stopped = true;
+      if (delayedFlushTimer) clearTimeout(delayedFlushTimer);
+      clearInterval(heartbeatTick);
+      try {
+        await editChain;
+      } catch {}
+    },
+  };
+}
+
 function getConversationKey(message) {
   if (!message.guildId) return `dm:${message.author.id}`;
   if (message.channel && message.channel.isThread && message.channel.isThread()) {
@@ -362,6 +675,7 @@ function getSession(key) {
   const created = {
     threadId: null,
     workdir: CONFIG.defaultWorkdir,
+    contextVersion: 0,
     updatedAt: new Date().toISOString(),
   };
   state.sessions[key] = created;
@@ -384,6 +698,76 @@ function parseCommand(prompt) {
     name: match[1].toLowerCase(),
     arg: (match[2] || "").trim(),
   };
+}
+
+function getSessionContextVersion(session) {
+  if (!session || typeof session !== "object") return 0;
+  const n = Number(session.contextVersion || 0);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+function shouldInjectRelayContext(session) {
+  if (!CONFIG.contextEnabled) return false;
+  if (CONFIG.contextEveryTurn) return true;
+  return getSessionContextVersion(session) < CONFIG.contextVersion;
+}
+
+async function readRelayContextFile() {
+  if (!CONFIG.contextFile) return "";
+  try {
+    const raw = await fsp.readFile(CONFIG.contextFile, "utf8");
+    const trimmed = String(raw || "").trim();
+    if (!trimmed) return "";
+    if (trimmed.length <= CONFIG.contextMaxChars) return trimmed;
+    return `${trimmed.slice(0, CONFIG.contextMaxChars)}\n...[context truncated]`;
+  } catch {
+    return "";
+  }
+}
+
+function buildRelayRuntimeContext(meta) {
+  const scope = meta && meta.isDm ? "dm" : meta && meta.isThread ? "guild-thread" : "guild-channel";
+  const uploadDir = meta && meta.uploadDir ? meta.uploadDir : CONFIG.uploadRootDir;
+  const workdir = meta && meta.session && meta.session.workdir ? meta.session.workdir : CONFIG.defaultWorkdir;
+  const lines = [
+    `You are running through a Discord relay (provider=${CONFIG.agentProvider}, scope=${scope}).`,
+    "Your response is posted back to Discord.",
+    `Conversation key: ${meta && meta.conversationKey ? meta.conversationKey : "unknown"}`,
+    `Current workdir: ${workdir}`,
+    "",
+    "Relay capabilities:",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload.",
+    "- You cannot execute slash commands directly; ask the user to run them when needed.",
+  ];
+  if (CONFIG.uploadEnabled) {
+    lines.push(
+      "- File attachment bridge is enabled.",
+      `- Preferred upload base dir: ${uploadDir}`,
+      "- To attach an image file, include markers like [[upload:relative/or/absolute/path]] in your final response.",
+      "- Do not claim uploads are unsupported unless an actual error occurred."
+    );
+  } else {
+    lines.push("- File attachment bridge is disabled in this relay instance.");
+  }
+  lines.push(
+    "",
+    "Respond to the user normally; this context only describes runtime behavior."
+  );
+  return lines.join("\n");
+}
+
+async function buildAgentPrompt(session, userPrompt, meta) {
+  if (!shouldInjectRelayContext(session)) {
+    return { prompt: userPrompt, contextInjected: false };
+  }
+  const runtimeContext = buildRelayRuntimeContext({ ...meta, session });
+  const extraContext = await readRelayContextFile();
+  const contextBlock = extraContext
+    ? `${runtimeContext}\n\nInstance-specific context:\n${extraContext}`
+    : runtimeContext;
+  const prompt = ["[Relay Runtime Context]", contextBlock, "", "[User Message]", userPrompt].join("\n");
+  return { prompt, contextInjected: true };
 }
 
 function buildCodexArgs(session, prompt) {
@@ -444,7 +828,7 @@ function waitForChildExit(child, label) {
   });
 }
 
-async function runCodex(session, prompt, extraEnv) {
+async function runCodex(session, prompt, extraEnv, onProgress) {
   const args = buildCodexArgs(session, prompt);
   const env =
     extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
@@ -475,6 +859,8 @@ async function runCodex(session, prompt, extraEnv) {
       ) {
         finalText = evt.item.text;
       }
+      const summary = summarizeCodexProgressEvent(evt);
+      if (summary) emitProgress(onProgress, summary);
       return;
     } catch {}
     rawStdoutLines.push(trimmed);
@@ -504,7 +890,8 @@ async function runCodex(session, prompt, extraEnv) {
 }
 
 function buildClaudeArgs(session, prompt) {
-  const args = ["-p", "--output-format", "json"];
+  // stream-json gives us tool and thinking events so we can relay human-friendly progress updates.
+  const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (CONFIG.claudeModel) args.push("--model", CONFIG.claudeModel);
   if (CONFIG.claudePermissionMode) args.push("--permission-mode", CONFIG.claudePermissionMode);
   if (session.threadId) args.push("--resume", session.threadId);
@@ -526,17 +913,48 @@ function extractClaudeTextFromJson(parsed, fallbackText) {
   return fallbackText;
 }
 
-async function runClaude(session, prompt, extraEnv) {
+async function runClaude(session, prompt, extraEnv, onProgress) {
   const args = buildClaudeArgs(session, prompt);
   const env =
     extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
   const child = spawn(CONFIG.claudeBin, args, {
     cwd: session.workdir || CONFIG.defaultWorkdir,
     env,
+    stdio: ["ignore", "pipe", "pipe"],
   });
 
-  let stdout = "";
+  let threadId = session.threadId || null;
+  let parsedResult = null;
+  let lastAssistantEvent = null;
+  const toolNamesById = new Map();
+  const rawStdoutLines = [];
   const stderrLines = [];
+
+  const stdoutRl = readline.createInterface({ input: child.stdout });
+  stdoutRl.on("line", (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    rawStdoutLines.push(trimmed);
+    if (rawStdoutLines.length > 400) rawStdoutLines.shift();
+
+    let evt = null;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (!evt || typeof evt !== "object") return;
+
+    if (typeof evt.session_id === "string" && evt.session_id) {
+      threadId = evt.session_id;
+    }
+    if (evt.type === "assistant") lastAssistantEvent = evt;
+    if (evt.type === "result") parsedResult = evt;
+
+    const summary = summarizeClaudeProgressEvent(evt, toolNamesById);
+    if (summary) emitProgress(onProgress, summary);
+  });
+
   const stderrRl = readline.createInterface({ input: child.stderr });
   stderrRl.on("line", (line) => {
     const trimmed = line.trim();
@@ -544,52 +962,29 @@ async function runClaude(session, prompt, extraEnv) {
     stderrLines.push(trimmed);
     if (stderrLines.length > 80) stderrLines.shift();
   });
-  child.stdout.on("data", (chunk) => {
-    stdout += String(chunk || "");
-    if (stdout.length > 1024 * 1024) stdout = stdout.slice(-1024 * 1024);
-  });
 
   const exitCode = await waitForChildExit(child, "claude");
 
-  const stdoutTrimmed = stdout.trim();
+  const stdoutTrimmed = rawStdoutLines.join("\n").trim();
   if (exitCode !== 0) {
-    const detail = stderrLines.slice(-20).join("\n") || stdoutTrimmed.slice(-4000);
+    const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-40).join("\n");
     throw new Error(`claude exit ${exitCode}\n${detail}`.trim());
   }
 
-  let parsed = null;
-  if (stdoutTrimmed) {
-    const lines = stdoutTrimmed
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      try {
-        parsed = JSON.parse(lines[i]);
-        break;
-      } catch {}
-    }
-    if (!parsed) {
-      try {
-        parsed = JSON.parse(stdoutTrimmed);
-      } catch {}
-    }
-  }
-
-  const fallbackText = stdoutTrimmed || "No message returned by Claude.";
+  const parsed = parsedResult || lastAssistantEvent;
+  const fallbackText =
+    extractClaudeTextFromJson(lastAssistantEvent, "").trim() ||
+    stdoutTrimmed ||
+    "No message returned by Claude.";
   const text = extractClaudeTextFromJson(parsed, fallbackText);
-  const threadId =
-    parsed && typeof parsed.session_id === "string" && parsed.session_id
-      ? parsed.session_id
-      : session.threadId || null;
-  return { threadId, text };
+  return { threadId: threadId || session.threadId || null, text };
 }
 
-async function runAgent(session, prompt, extraEnv) {
+async function runAgent(session, prompt, extraEnv, onProgress) {
   if (CONFIG.agentProvider === "claude") {
-    return runClaude(session, prompt, extraEnv);
+    return runClaude(session, prompt, extraEnv, onProgress);
   }
-  return runCodex(session, prompt, extraEnv);
+  return runCodex(session, prompt, extraEnv, onProgress);
 }
 
 function isStaleThreadResumeError(err) {
@@ -640,11 +1035,13 @@ async function handleCommand(message, session, command, conversationKey) {
   if (command.name === "status") {
     const key = conversationKey || getConversationKey(message);
     const uploadDir = getConversationUploadDir(key);
+    const sessionContextVersion = getSessionContextVersion(session);
     await message.reply(
       [
         `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
         `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
         `upload_dir: ${uploadDir}`,
+        `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
       ].join("\n")
     );
     return true;
@@ -652,6 +1049,7 @@ async function handleCommand(message, session, command, conversationKey) {
 
   if (command.name === "reset") {
     session.threadId = null;
+    session.contextVersion = 0;
     session.updatedAt = new Date().toISOString();
     await queueSaveState();
     await message.reply(`Session reset. Next message starts a new ${AGENT_LABEL} session.`);
@@ -686,6 +1084,7 @@ async function handleCommand(message, session, command, conversationKey) {
     }
     session.workdir = resolved;
     session.threadId = null;
+    session.contextVersion = 0;
     session.updatedAt = new Date().toISOString();
     await queueSaveState();
     await message.reply(`Workdir set to \`${resolved}\`. Session reset.`);
@@ -707,6 +1106,8 @@ async function handleCommand(message, session, command, conversationKey) {
       return true;
     }
     session.threadId = id;
+    // Force one bootstrap injection after attach so relay capabilities are re-established.
+    session.contextVersion = 0;
     session.updatedAt = new Date().toISOString();
     await queueSaveState();
     await message.reply(`Attached. ${AGENT_SESSION_LABEL} is now: \`${id}\``);
@@ -807,19 +1208,63 @@ async function main() {
       }
 
       const pendingMsg = await message.reply(`Running ${AGENT_LABEL}...`);
+      const wasAlreadyQueued = queueByConversation.has(key);
+      const progress = createProgressReporter(pendingMsg, key);
+      if (wasAlreadyQueued) {
+        progress.note("Waiting for an earlier request in this conversation");
+      }
+      logRelayEvent("message.queued", {
+        conversationKey: key,
+        provider: CONFIG.agentProvider,
+        promptChars: prompt.length,
+        sessionId: session.threadId || null,
+      });
       await enqueueConversation(key, async () => {
+        const startedAt = Date.now();
         try {
-          await message.channel.sendTyping();
+          progress.note(`Starting ${AGENT_LABEL} run`);
+          void message.channel
+            .sendTyping()
+            .catch((err) =>
+              logRelayEvent("discord.sendTyping.error", {
+                conversationKey: key,
+                error: String(err && err.message ? err.message : err).slice(0, 240),
+              })
+            );
           const uploadDir = getConversationUploadDir(key);
           if (CONFIG.uploadEnabled) {
             await fsp.mkdir(uploadDir, { recursive: true });
           }
+          logRelayEvent("agent.run.start", {
+            conversationKey: key,
+            provider: CONFIG.agentProvider,
+            sessionId: session.threadId || null,
+            workdir: session.workdir || CONFIG.defaultWorkdir,
+          });
+          let contextInjected = false;
           let result;
           try {
+            const firstPrompt = await buildAgentPrompt(session, prompt, {
+              conversationKey: key,
+              uploadDir,
+              isDm,
+              isThread,
+            });
+            contextInjected = firstPrompt.contextInjected;
+            if (firstPrompt.contextInjected) {
+              logRelayEvent("agent.run.context_injected", {
+                conversationKey: key,
+                provider: CONFIG.agentProvider,
+                sessionId: session.threadId || null,
+                contextVersion: CONFIG.contextVersion,
+              });
+              progress.note("Loaded relay runtime context");
+            }
             result = await runAgent(
               session,
-              prompt,
-              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
+              firstPrompt.prompt,
+              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
+              (line) => progress.note(line)
             );
           } catch (runErr) {
             if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
@@ -827,18 +1272,40 @@ async function main() {
             session.threadId = null;
             session.updatedAt = new Date().toISOString();
             await queueSaveState();
+            logRelayEvent("agent.run.retry_stale_session", {
+              conversationKey: key,
+              provider: CONFIG.agentProvider,
+              staleSessionId: staleThreadId,
+            });
+            progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
+            const retryPrompt = await buildAgentPrompt(session, prompt, {
+              conversationKey: key,
+              uploadDir,
+              isDm,
+              isThread,
+            });
+            contextInjected = contextInjected || retryPrompt.contextInjected;
             result = await runAgent(
               session,
-              prompt,
-              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null
+              retryPrompt.prompt,
+              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
+              (line) => progress.note(line)
             );
             result.text =
               `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
               (result.text || "");
           }
           session.threadId = result.threadId || session.threadId;
+          if (contextInjected) session.contextVersion = CONFIG.contextVersion;
           session.updatedAt = new Date().toISOString();
           await queueSaveState();
+          logRelayEvent("agent.run.done", {
+            conversationKey: key,
+            provider: CONFIG.agentProvider,
+            durationMs: Date.now() - startedAt,
+            sessionId: session.threadId || null,
+            resultChars: (result.text || "").length,
+          });
 
           let answer = result.text || "No response.";
           let uploadPaths = [];
@@ -848,6 +1315,7 @@ async function main() {
             uploadPaths = parsed.rawPaths || [];
           }
 
+          await progress.stop();
           const chunks = splitMessage(answer, Math.max(300, CONFIG.maxReplyChars));
           await pendingMsg.edit(chunks[0]);
           for (let i = 1; i < chunks.length; i += 1) {
@@ -868,8 +1336,27 @@ async function main() {
             }
           }
         } catch (err) {
+          await progress.stop();
           const detail = String(err.message || err).slice(0, 1800);
-          await pendingMsg.edit(`${AGENT_LABEL} error:\n\`\`\`\n${detail}\n\`\`\``);
+          logRelayEvent("message.failed", {
+            conversationKey: key,
+            provider: CONFIG.agentProvider,
+            durationMs: Date.now() - startedAt,
+            sessionId: session.threadId || null,
+            error: detail.slice(0, 240),
+          });
+          const errorBody = `${AGENT_LABEL} error:\n\`\`\`\n${detail}\n\`\`\``;
+          try {
+            await pendingMsg.edit(errorBody);
+          } catch (editErr) {
+            logRelayEvent("message.error_edit_failed", {
+              conversationKey: key,
+              error: String(editErr && editErr.message ? editErr.message : editErr).slice(0, 240),
+            });
+            try {
+              await sendLongReply(message, errorBody);
+            } catch {}
+          }
         }
       });
     } catch (err) {

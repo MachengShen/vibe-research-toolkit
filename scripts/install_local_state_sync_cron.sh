@@ -8,7 +8,8 @@ source "$ROOT_DIR/scripts/common.sh"
 require_root
 
 SYNC_ENABLED="${OPENCLAW_STATE_SYNC_CRON_ENABLED:-false}"
-SYNC_CRON="${OPENCLAW_STATE_SYNC_CRON:-12 * * * *}"
+# Default daily cadence (03:05 local time) to align with the kit autoupdate (03:17).
+SYNC_CRON="${OPENCLAW_STATE_SYNC_CRON:-5 3 * * *}"
 SYNC_CRON_FILE="${OPENCLAW_STATE_SYNC_CRON_FILE:-/etc/cron.d/openclaw-state-sync}"
 SYNC_LOG="${OPENCLAW_STATE_SYNC_LOG:-/var/log/openclaw-state-sync.log}"
 WITH_SECRETS="${OPENCLAW_STATE_SYNC_INCLUDE_SECRETS:-false}"

@@ -211,7 +211,7 @@ bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push fal
 To automate this direction, enable cron fallback in `config/setup.env`:
 
 - `OPENCLAW_STATE_SYNC_CRON_ENABLED=true`
-- `OPENCLAW_STATE_SYNC_CRON=12 * * * *` (example)
+- `OPENCLAW_STATE_SYNC_CRON=5 3 * * *` (example; daily)
 
 Then run bootstrap (or directly run `scripts/install_local_state_sync_cron.sh`).
 

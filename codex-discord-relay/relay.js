@@ -200,10 +200,10 @@ const CONFIG = {
   contextEnabled: boolEnv("RELAY_CONTEXT_ENABLED", true),
   contextEveryTurn: boolEnv("RELAY_CONTEXT_EVERY_TURN", false),
   contextVersion: Math.max(1, intEnv("RELAY_CONTEXT_VERSION", 1)),
-  contextMaxChars: Math.max(200, intEnv("RELAY_CONTEXT_MAX_CHARS", 6000)),
+  contextMaxChars: Math.max(200, intEnv("RELAY_CONTEXT_MAX_CHARS", 40000)),
   contextMaxCharsPerFile: Math.max(
     200,
-    intEnv("RELAY_CONTEXT_MAX_CHARS_PER_FILE", intEnv("RELAY_CONTEXT_MAX_CHARS", 6000))
+    intEnv("RELAY_CONTEXT_MAX_CHARS_PER_FILE", intEnv("RELAY_CONTEXT_MAX_CHARS", 40000))
   ),
   contextSpecs: parseContextSpecs(process.env.RELAY_CONTEXT_FILE || ""),
 

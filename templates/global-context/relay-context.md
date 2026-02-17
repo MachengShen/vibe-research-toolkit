@@ -38,5 +38,6 @@ For any project with active experiments or ongoing work:
 | Skills (canonical) | `/root/.agents/skills/` |
 | Skills kit repo | `/root/openclaw-codex-discord-skills-kit/` |
 | Relay config | `/root/.codex-discord-relay.env` |
+| Agent system overview | `/root/AGENT_SYSTEM_OVERVIEW.md` |
 | System working memory | `/root/SYSTEM_SETUP_WORKING_MEMORY.md` |
 | Global handoff log | `/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` |

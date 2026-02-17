@@ -125,15 +125,15 @@ Controls:
   - Prefix each spec with `head:`, `tail:`, or `headtail:`. If omitted, `head:` is used.
   - Absolute paths are loaded directly.
   - Relative paths resolve against the active session workdir (`/workdir`).
-- `RELAY_CONTEXT_MAX_CHARS=<int>` (default `6000`)
+- `RELAY_CONTEXT_MAX_CHARS=<int>` (default `40000`)
 - `RELAY_CONTEXT_MAX_CHARS_PER_FILE=<int>` (default `2000` in templates; runtime default falls back to total budget)
 
 Example:
 
 ```bash
-RELAY_CONTEXT_FILE="/root/.codex-discord-relay/global-context.md;tail:docs/WORKING_MEMORY.md;tail:HANDOFF_LOG.md"
-RELAY_CONTEXT_MAX_CHARS=6000
-RELAY_CONTEXT_MAX_CHARS_PER_FILE=2000
+RELAY_CONTEXT_FILE="/root/.codex-discord-relay/global-context.md;tail:docs/WORKING_MEMORY.md;tail:HANDOFF_LOG.md;tail:/root/SYSTEM_SETUP_WORKING_MEMORY.md;tail:/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt"
+RELAY_CONTEXT_MAX_CHARS=40000
+RELAY_CONTEXT_MAX_CHARS_PER_FILE=20000
 ```
 
 Tips:

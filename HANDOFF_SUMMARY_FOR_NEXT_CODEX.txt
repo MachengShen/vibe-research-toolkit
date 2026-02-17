@@ -541,3 +541,13 @@ Training status: inactive (no active training run, epoch/metrics N/A).
   - node --check codex-discord-relay/relay.js
 - Runtime note: live relay already updated in /root/.codex-discord-relay.env + restarted; this change makes installs persistent.
 - Training status: no active training run in this task; epoch/metrics N/A.
+
+[2026-02-17T21:50:52+08:00] owner=codex objective=Increase relay context budgets + align toolkit defaults
+- Major changes in toolkit repo:
+  - codex-discord-relay/relay.js: default RELAY_CONTEXT_MAX_CHARS now 40000
+  - codex-discord-relay/.env.example + config/setup.env.example + scripts/install_codex_discord_relay.sh:
+    - defaults RELAY_CONTEXT_MAX_CHARS=40000
+    - defaults RELAY_CONTEXT_MAX_CHARS_PER_FILE=20000
+    - example/default RELAY_CONTEXT_FILE includes system tails: tail:/root/SYSTEM_SETUP_WORKING_MEMORY.md ; tail:/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt
+  - templates/global-context/relay-context.md: added Agent system overview path in Key Paths table
+- Runtime note: live envs were updated and relays restarted; context injection now uses ~39k chars across 3 files.

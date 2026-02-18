@@ -153,6 +153,7 @@ Commands:
 - `/plan <request...>` (or `/plan new <request...>`): generate and save a plan (Codex run uses `--sandbox read-only`).
 - `/plan list`: list saved plans for this conversation.
 - `/plan show <id|last>`: show a saved plan.
+- `/plan queue <id|last> [--run]`: extract the plan's "Task breakdown" list and enqueue items as `/task` entries (optional `--run` starts the task runner).
 - `/plan apply <id|last> [--confirm]`: execute a saved plan (agent edits repo).
 
 Notes:

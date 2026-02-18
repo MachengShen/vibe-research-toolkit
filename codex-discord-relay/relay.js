@@ -1523,6 +1523,7 @@ function buildRelayRuntimeContext(meta) {
     "",
     "Relay capabilities:",
     "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff.",
+    "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
   ];
   if (CONFIG.discordAttachmentsEnabled) {
@@ -2038,7 +2039,7 @@ function parsePlanSteps(planText) {
 
   // Preferred: markdown task list.
   for (const line of lines) {
-    const m = line.match(/^\s*-\s*\[\s*\]\s+(.+?)\s*$/);
+    const m = line.match(/^\s*[-*]\s*\[\s*[xX ]?\s*\]\s+(.+?)\s*$/);
     if (m) steps.push(m[1]);
   }
   if (steps.length > 0) return steps;
@@ -2052,10 +2053,46 @@ function parsePlanSteps(planText) {
 
   // Last resort: non-empty bullets.
   for (const line of lines) {
-    const m = line.match(/^\s*-\s+(.+?)\s*$/);
+    const m = line.match(/^\s*[-*]\s+(.+?)\s*$/);
     if (m) steps.push(m[1]);
   }
   return steps;
+}
+
+function extractPlanTaskBreakdownText(planText) {
+  const raw = String(planText || "");
+  if (!raw.trim()) return "";
+  const lines = raw.split(/\r?\n/);
+
+  let start = -1;
+  let headingLevel = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const m = line.match(/^\s*(#{1,6})\s+Task breakdown\b/i);
+    if (!m) continue;
+    headingLevel = m[1].length;
+    start = i + 1;
+    break;
+  }
+  if (start < 0) return "";
+
+  const out = [];
+  for (let i = start; i < lines.length; i += 1) {
+    const line = lines[i];
+    const m = line.match(/^\s*(#{1,6})\s+\S/);
+    if (m && m[1].length <= headingLevel) break;
+    out.push(line);
+  }
+  return out.join("\n").trim();
+}
+
+function parsePlanTaskBreakdownSteps(planText) {
+  const breakdown = extractPlanTaskBreakdownText(planText);
+  const usedTaskBreakdown = Boolean(breakdown);
+  const steps = parsePlanSteps(breakdown || planText)
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  return { steps, usedTaskBreakdown };
 }
 
 function nextTaskId(session) {
@@ -3017,7 +3054,7 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/context reload` - force context re-bootstrap on next message",
         "`/task <subcmd>` - manage per-conversation task queue (add/list/run/stop/clear)",
         "`/worktree <subcmd>` - manage git worktrees (list/new/use/rm/prune)",
-        "`/plan <subcmd>` - manage plans (new/list/show/apply)",
+        "`/plan <subcmd>` - manage plans (new/list/show/queue/apply)",
         "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
       ].join("\n")
     );
@@ -3118,6 +3155,114 @@ async function handleCommand(message, session, command, conversationKey) {
       }
       const text = (await loadPlanText(plan)).trim();
       await sendLongReply(message, [`Plan \`${plan.id}\` (${plan.createdAt})`, plan.path ? `path: \`${plan.path}\`` : null, "", text || "(empty)"].filter(Boolean).join("\n"));
+      return true;
+    }
+
+    if (sub === "queue") {
+      if (!CONFIG.tasksEnabled) {
+        await message.reply("Tasks are disabled on this relay (RELAY_TASKS_ENABLED=false).");
+        return true;
+      }
+      const tokens = (rest || "").split(/\s+/).filter(Boolean);
+      const id = tokens[0] || "last";
+      const autoRun = tokens.includes("--run");
+
+      const plan = findPlan(session, id);
+      if (!plan) {
+        await message.reply("No such plan. Use `/plan list`.");
+        return true;
+      }
+      if (isTaskRunnerActive(conversationKey, session)) {
+        await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+        return true;
+      }
+
+      ensureTasksShape(session);
+      ensureTaskLoopShape(session);
+
+      const planText = (await loadPlanText(plan)).trim();
+      if (!planText) {
+        await message.reply("Plan text is empty or missing.");
+        return true;
+      }
+
+      const parsed = parsePlanTaskBreakdownSteps(planText);
+      if (!parsed.steps.length) {
+        await message.reply(
+          "Couldn't find any steps to queue. Ensure the plan includes a '# Task breakdown …' section with '-' bullets or a numbered list."
+        );
+        return true;
+      }
+
+      const existingPendingOrRunning = new Set(
+        (session.tasks || [])
+          .filter((t) => t && typeof t === "object" && (t.status === "pending" || t.status === "running"))
+          .map((t) => String(t.text || "").trim())
+          .filter(Boolean)
+      );
+
+      let pendingCount = (session.tasks || []).filter((t) => t && typeof t === "object" && t.status === "pending").length;
+      let queued = 0;
+      let dupSkipped = 0;
+      let limitSkipped = 0;
+
+      for (let i = 0; i < parsed.steps.length; i += 1) {
+        const step = parsed.steps[i];
+        if (!step) continue;
+        if (existingPendingOrRunning.has(step)) {
+          dupSkipped += 1;
+          continue;
+        }
+        if (CONFIG.tasksMaxPending > 0 && pendingCount >= CONFIG.tasksMaxPending) {
+          limitSkipped = parsed.steps.length - i;
+          break;
+        }
+        const task = createTask(session, step);
+        session.tasks.push(task);
+        existingPendingOrRunning.add(step);
+        pendingCount += 1;
+        queued += 1;
+      }
+
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      logRelayEvent("plan.queue", {
+        conversationKey,
+        planId: plan.id,
+        stepsFound: parsed.steps.length,
+        queued,
+        dupSkipped,
+        limitSkipped,
+        mode: parsed.usedTaskBreakdown ? "task_breakdown" : "fallback_full_plan",
+      });
+
+      const modeNote = parsed.usedTaskBreakdown ? "Task breakdown section" : "fallback parse (whole plan)";
+      const lines = [
+        `Queued ${queued} task(s) from plan \`${plan.id}\` (${modeNote}).`,
+        `steps_found=${parsed.steps.length} dup_skipped=${dupSkipped} limit_skipped=${limitSkipped}`,
+        "",
+        "Next:",
+        "- `/task list`",
+        autoRun ? null : "- `/task run`",
+      ].filter(Boolean);
+      await sendLongReply(message, lines.join("\n"));
+
+      if (autoRun && queued > 0) {
+        if (taskRunnerByConversation.has(conversationKey)) return true;
+        const next = findNextPendingTask(session);
+        if (!next) return true;
+        session.taskLoop.running = true;
+        session.taskLoop.stopRequested = false;
+        session.taskLoop.currentTaskId = null;
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
+        await message.channel.send("Task runner started.");
+        void kickTaskRunner(conversationKey, message.channel, session, {
+          isDm: !message.guildId,
+          isThread: Boolean(message.channel && message.channel.isThread && message.channel.isThread()),
+        });
+      }
       return true;
     }
 

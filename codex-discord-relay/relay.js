@@ -289,6 +289,25 @@ const CONFIG = {
   gitAutoCommitScope: (process.env.RELAY_GIT_AUTO_COMMIT_SCOPE || "both").trim().toLowerCase(),
   gitCommitPrefix: (process.env.RELAY_GIT_COMMIT_PREFIX || "ai:").trim() || "ai:",
 
+  // Agent-requested relay actions (disabled by default; enable explicitly).
+  // These are high-powered primitives intended for trusted environments.
+  agentActionsEnabled: boolEnv("RELAY_AGENT_ACTIONS_ENABLED", false),
+  agentActionsDmOnly: boolEnv("RELAY_AGENT_ACTIONS_DM_ONLY", true),
+  agentActionsAllowed: (() => {
+    const raw = String(process.env.RELAY_AGENT_ACTIONS_ALLOWED || "").trim();
+    const list = raw ? parseToolList(raw) : ["job_start", "job_stop", "job_watch"];
+    return new Set(list.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean));
+  })(),
+  agentActionsMaxPerMessage: Math.max(0, intEnv("RELAY_AGENT_ACTIONS_MAX_PER_MESSAGE", 1)),
+
+  // Job auto-watch defaults (only relevant when agent actions are enabled).
+  jobsAutoWatch: (() => {
+    const fallback = boolEnv("RELAY_AGENT_ACTIONS_ENABLED", false);
+    return boolEnv("RELAY_JOBS_AUTO_WATCH", fallback);
+  })(),
+  jobsAutoWatchEverySec: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_EVERY_SEC", 300)),
+  jobsAutoWatchTailLines: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_TAIL_LINES", 50)),
+
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
   progressHeartbeatMs: Math.max(1000, intEnv("RELAY_PROGRESS_HEARTBEAT_MS", 20000)),
@@ -341,6 +360,8 @@ let saveChain = Promise.resolve();
 const queueByConversation = new Map();
 const activeChildByConversation = new Map();
 const taskRunnerByConversation = new Map();
+const jobWatchersByKey = new Map();
+let DISCORD_CLIENT = null;
 
 function isSubPath(parentDir, childDir) {
   const relative = path.relative(parentDir, childDir);
@@ -444,6 +465,173 @@ function extractUploadMarkers(text) {
   }
   out += rawText.slice(last);
   return { text: out, rawPaths };
+}
+
+function normalizeRelayActionWatch(rawWatch) {
+  if (!rawWatch || typeof rawWatch !== "object" || Array.isArray(rawWatch)) {
+    return { ok: true, watch: null };
+  }
+  const allowedKeys = new Set(["everySec", "tailLines", "thenTask", "runTasks"]);
+  for (const k of Object.keys(rawWatch)) {
+    if (!allowedKeys.has(k)) {
+      return { ok: false, error: `unknown watch field: ${k}`, watch: null };
+    }
+  }
+
+  const everySecRaw = rawWatch.everySec;
+  const tailLinesRaw = rawWatch.tailLines;
+  const thenTaskRaw = rawWatch.thenTask;
+  const runTasksRaw = rawWatch.runTasks;
+
+  const everySec = everySecRaw == null ? null : Number(everySecRaw);
+  const tailLines = tailLinesRaw == null ? null : Number(tailLinesRaw);
+
+  const normalized = {
+    everySec:
+      everySec == null || !Number.isFinite(everySec) ? null : Math.max(1, Math.min(86400, Math.floor(everySec))),
+    tailLines:
+      tailLines == null || !Number.isFinite(tailLines) ? null : Math.max(1, Math.min(500, Math.floor(tailLines))),
+    thenTask:
+      thenTaskRaw == null
+        ? null
+        : (() => {
+            const s = String(thenTaskRaw || "").trim();
+            if (!s) return null;
+            return s.length > 2000 ? s.slice(0, 2000) : s;
+          })(),
+    runTasks: Boolean(runTasksRaw),
+  };
+
+  // If all fields are empty, treat as no watch config.
+  const hasAny =
+    normalized.everySec != null || normalized.tailLines != null || normalized.thenTask != null || normalized.runTasks;
+  return { ok: true, watch: hasAny ? normalized : null };
+}
+
+function normalizeRelayAction(rawAction) {
+  if (!rawAction || typeof rawAction !== "object" || Array.isArray(rawAction)) {
+    return { ok: false, error: "action is not an object", action: null };
+  }
+  const type = String(rawAction.type || "").trim().toLowerCase();
+  if (!type) return { ok: false, error: "missing action.type", action: null };
+
+  const assertAllowedKeys = (keys) => {
+    const allowed = new Set(keys);
+    for (const k of Object.keys(rawAction)) {
+      if (!allowed.has(k)) return `unknown action field: ${k}`;
+    }
+    return "";
+  };
+
+  if (type === "job_start") {
+    const err = assertAllowedKeys(["type", "command", "watch"]);
+    if (err) return { ok: false, error: err, action: null };
+    const command = String(rawAction.command || "").trim();
+    if (!command) return { ok: false, error: "job_start: missing command", action: null };
+    if (command.length > 4000) return { ok: false, error: "job_start: command too long", action: null };
+    const watchRes = normalizeRelayActionWatch(rawAction.watch);
+    if (!watchRes.ok) return { ok: false, error: `job_start: ${watchRes.error}`, action: null };
+    return { ok: true, error: "", action: { type, command, watch: watchRes.watch } };
+  }
+
+  if (type === "job_watch") {
+    const err = assertAllowedKeys(["type", "watch"]);
+    if (err) return { ok: false, error: err, action: null };
+    const watchRes = normalizeRelayActionWatch(rawAction.watch);
+    if (!watchRes.ok) return { ok: false, error: `job_watch: ${watchRes.error}`, action: null };
+    return { ok: true, error: "", action: { type, watch: watchRes.watch } };
+  }
+
+  if (type === "job_stop") {
+    const err = assertAllowedKeys(["type"]);
+    if (err) return { ok: false, error: err, action: null };
+    return { ok: true, error: "", action: { type } };
+  }
+
+  if (type === "task_add") {
+    const err = assertAllowedKeys(["type", "text"]);
+    if (err) return { ok: false, error: err, action: null };
+    const text = String(rawAction.text || "").trim();
+    if (!text) return { ok: false, error: "task_add: missing text", action: null };
+    const clipped = text.length > 2000 ? text.slice(0, 2000) : text;
+    return { ok: true, error: "", action: { type, text: clipped } };
+  }
+
+  if (type === "task_run") {
+    const err = assertAllowedKeys(["type"]);
+    if (err) return { ok: false, error: err, action: null };
+    return { ok: true, error: "", action: { type } };
+  }
+
+  return { ok: false, error: `unknown action type: ${type}`, action: null };
+}
+
+function extractRelayActions(text, { maxActions = 1 } = {}) {
+  const rawText = String(text || "");
+  const rawLower = rawText.toLowerCase();
+  const startMarker = "[[relay-actions]]";
+  const endMarker = "[[/relay-actions]]";
+
+  let out = "";
+  let idx = 0;
+  const blocks = [];
+  const errors = [];
+
+  while (true) {
+    const start = rawLower.indexOf(startMarker, idx);
+    if (start === -1) break;
+    const end = rawLower.indexOf(endMarker, start + startMarker.length);
+    if (end === -1) break;
+    out += rawText.slice(idx, start);
+    const payload = rawText.slice(start + startMarker.length, end).trim();
+    blocks.push(payload);
+    idx = end + endMarker.length;
+  }
+  out += rawText.slice(idx);
+
+  const actions = [];
+  const budget = Math.max(0, Math.floor(Number(maxActions || 0)));
+
+  if (budget === 0) {
+    return { text: out, actions: [], errors: [] };
+  }
+
+  for (const block of blocks) {
+    if (actions.length >= budget) break;
+    const raw = String(block || "").trim();
+    if (!raw) continue;
+    if (raw.length > 20000) {
+      errors.push("relay-actions block too large (skipped)");
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      errors.push(`relay-actions JSON parse failed: ${String(err && err.message ? err.message : err).slice(0, 200)}`);
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      errors.push("relay-actions JSON must be an object");
+      continue;
+    }
+    const list = parsed.actions;
+    if (!Array.isArray(list)) {
+      errors.push("relay-actions JSON must include: {\"actions\": [...]}");
+      continue;
+    }
+    for (const rawAction of list) {
+      if (actions.length >= budget) break;
+      const normalized = normalizeRelayAction(rawAction);
+      if (!normalized.ok) {
+        errors.push(`relay-action rejected: ${normalized.error}`);
+        continue;
+      }
+      actions.push(normalized.action);
+    }
+  }
+
+  return { text: out, actions, errors };
 }
 
 async function resolveAndValidateUploads(conversationKey, rawPaths) {
@@ -913,12 +1101,131 @@ function ensurePlansShape(session) {
   return changed;
 }
 
+function normalizeJobWatchObject(watch) {
+  if (!watch || typeof watch !== "object" || Array.isArray(watch)) return null;
+  const out = {
+    enabled: Boolean(watch.enabled),
+    everySec: Math.max(1, Math.min(86400, Math.floor(Number(watch.everySec || 300) || 300))),
+    tailLines: Math.max(1, Math.min(500, Math.floor(Number(watch.tailLines || 50) || 50))),
+    thenTask: watch.thenTask == null ? null : String(watch.thenTask || "").trim() || null,
+    runTasks: Boolean(watch.runTasks),
+  };
+  if (out.thenTask && out.thenTask.length > 2000) out.thenTask = out.thenTask.slice(0, 2000);
+  return out;
+}
+
+function normalizeJobObject(job, fallbackId) {
+  if (!job || typeof job !== "object") return false;
+  let changed = false;
+  const validStatuses = new Set(["running", "done", "failed", "canceled"]);
+
+  if (typeof job.id !== "string" || !job.id.trim()) {
+    job.id = String(fallbackId || `j-${Date.now()}`);
+    changed = true;
+  }
+  if (typeof job.command !== "string") {
+    job.command = String(job.command || "");
+    changed = true;
+  }
+  if (typeof job.workdir !== "string" || !job.workdir.trim()) {
+    job.workdir = CONFIG.defaultWorkdir;
+    changed = true;
+  }
+  const status = String(job.status || "running").toLowerCase();
+  if (!validStatuses.has(status)) {
+    job.status = "running";
+    changed = true;
+  } else if (job.status !== status) {
+    job.status = status;
+    changed = true;
+  }
+  if (typeof job.startedAt !== "string" || !job.startedAt) {
+    job.startedAt = nowIso();
+    changed = true;
+  }
+  if (job.finishedAt != null && typeof job.finishedAt !== "string") {
+    job.finishedAt = null;
+    changed = true;
+  }
+  if (job.pid != null && (typeof job.pid !== "number" || !Number.isFinite(job.pid) || job.pid <= 0)) {
+    job.pid = null;
+    changed = true;
+  }
+  for (const k of ["jobDir", "logPath", "exitCodePath", "pidPath"]) {
+    if (job[k] != null && typeof job[k] !== "string") {
+      job[k] = String(job[k] || "");
+      changed = true;
+    }
+  }
+  if (job.exitCode != null && (typeof job.exitCode !== "number" || !Number.isFinite(job.exitCode))) {
+    job.exitCode = null;
+    changed = true;
+  }
+
+  const normalizedWatch = normalizeJobWatchObject(job.watch);
+  if (normalizedWatch) {
+    const before = JSON.stringify(job.watch || {});
+    const after = JSON.stringify(normalizedWatch);
+    if (before !== after) {
+      job.watch = normalizedWatch;
+      changed = true;
+    }
+  } else if (job.watch != null) {
+    job.watch = null;
+    changed = true;
+  }
+  return changed;
+}
+
+function ensureJobsShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!Array.isArray(session.jobs)) {
+    session.jobs = [];
+    changed = true;
+  }
+  for (let i = 0; i < session.jobs.length; i += 1) {
+    const job = session.jobs[i];
+    changed = normalizeJobObject(job, `j-${String(i + 1).padStart(4, "0")}`) || changed;
+  }
+  if (session.jobs.length > 50) {
+    session.jobs = session.jobs.slice(-50);
+    changed = true;
+  }
+  return changed;
+}
+
+function ensureAutoShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!session.auto || typeof session.auto !== "object" || Array.isArray(session.auto)) {
+    session.auto = { actions: true };
+    return true;
+  }
+  if (typeof session.auto.actions !== "boolean") {
+    session.auto.actions = true;
+    changed = true;
+  }
+  return changed;
+}
+
 function normalizeSessionAfterLoad(session) {
   if (!session || typeof session !== "object") return false;
   let changed = false;
   changed = ensureTasksShape(session) || changed;
   changed = ensureTaskLoopShape(session) || changed;
   changed = ensurePlansShape(session) || changed;
+  changed = ensureJobsShape(session) || changed;
+  changed = ensureAutoShape(session) || changed;
+
+  if (session.lastChannelId != null && typeof session.lastChannelId !== "string") {
+    session.lastChannelId = null;
+    changed = true;
+  }
+  if (session.lastGuildId != null && typeof session.lastGuildId !== "string") {
+    session.lastGuildId = null;
+    changed = true;
+  }
 
   // After a relay restart, there is no running in-memory runner/child. Reset any
   // in-flight task state so `/task list` doesn't show stuck tasks.
@@ -1298,6 +1605,8 @@ function getSession(key) {
     ensureTasksShape(existing);
     ensureTaskLoopShape(existing);
     ensurePlansShape(existing);
+    ensureJobsShape(existing);
+    ensureAutoShape(existing);
     return existing;
   }
   const created = {
@@ -1308,6 +1617,10 @@ function getSession(key) {
     tasks: [],
     taskLoop: { running: false, stopRequested: false, currentTaskId: null },
     plans: [],
+    jobs: [],
+    auto: { actions: true },
+    lastChannelId: null,
+    lastGuildId: null,
   };
   state.sessions[key] = created;
   return created;
@@ -1330,7 +1643,7 @@ function extractPrompt(message, botUserId) {
 
 function parseCommand(prompt) {
   const match = prompt.match(
-    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff)\b(?:\s+([\s\S]+))?$/i
+    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|auto)\b(?:\s+([\s\S]+))?$/i
   );
   if (!match) return null;
   return {
@@ -1522,9 +1835,11 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /auto.",
     "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
+    "- If you need to launch a long-running shell job and watch it, you may request relay actions via a JSON block:",
+    "- [[relay-actions]]{\"actions\":[{\"type\":\"job_start\",\"command\":\"sleep 3 && echo done\",\"watch\":{\"everySec\":1,\"tailLines\":50}}]}[[/relay-actions]] (requires RELAY_AGENT_ACTIONS_ENABLED=true; DM-only by default).",
   ];
   if (CONFIG.discordAttachmentsEnabled) {
     lines.push(
@@ -1984,6 +2299,431 @@ function planStoragePath(conversationKey, planId) {
   return path.join(planStorageDir(conversationKey), `${planId}.md`);
 }
 
+function newJobId() {
+  const d = new Date();
+  const yyyy = String(d.getFullYear());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const HH = String(d.getHours()).padStart(2, "0");
+  const MM = String(d.getMinutes()).padStart(2, "0");
+  const SS = String(d.getSeconds()).padStart(2, "0");
+  const rand = crypto.randomBytes(2).toString("hex");
+  return `j-${yyyy}${mm}${dd}-${HH}${MM}${SS}-${rand}`;
+}
+
+function jobStorageDir(conversationKey) {
+  return path.join(CONFIG.stateDir, "jobs", safeConversationDirName(conversationKey));
+}
+
+function jobStorageJobDir(conversationKey, jobId) {
+  return path.join(jobStorageDir(conversationKey), String(jobId || "job").trim() || "job");
+}
+
+function jobLogPath(conversationKey, jobId) {
+  return path.join(jobStorageJobDir(conversationKey, jobId), "job.log");
+}
+
+function jobExitCodePath(conversationKey, jobId) {
+  return path.join(jobStorageJobDir(conversationKey, jobId), "exit_code");
+}
+
+function jobPidPath(conversationKey, jobId) {
+  return path.join(jobStorageJobDir(conversationKey, jobId), "pid");
+}
+
+async function readJobExitCode(exitCodeFile) {
+  const p = String(exitCodeFile || "").trim();
+  if (!p) return { ok: false, code: null };
+  try {
+    const raw = await fsp.readFile(p, "utf8");
+    const s = String(raw || "").trim();
+    if (!s) return { ok: false, code: null };
+    const n = Number(s);
+    if (!Number.isFinite(n)) return { ok: false, code: null };
+    return { ok: true, code: Math.floor(n) };
+  } catch {
+    return { ok: false, code: null };
+  }
+}
+
+function isPidRunning(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function killProcessGroup(pid, signal) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(-n, signal);
+    return true;
+  } catch {}
+  try {
+    process.kill(n, signal);
+    return true;
+  } catch {}
+  return false;
+}
+
+async function readTailLines(filePath, maxLines, maxBytes = 128 * 1024) {
+  const p = String(filePath || "").trim();
+  if (!p) return "";
+  const wantLines = Math.max(1, Math.min(500, Math.floor(Number(maxLines || 50) || 50)));
+  const wantBytes = Math.max(1024, Math.min(2 * 1024 * 1024, Math.floor(Number(maxBytes || 0) || 0) || 128 * 1024));
+
+  let fd = null;
+  try {
+    const st = await fsp.stat(p);
+    if (!st.isFile()) return "";
+    const size = Number(st.size || 0);
+    const start = Math.max(0, size - wantBytes);
+    const len = Math.max(0, size - start);
+    fd = await fsp.open(p, "r");
+    const buf = Buffer.alloc(len);
+    await fd.read(buf, 0, len, start);
+    const text = buf.toString("utf8");
+    const lines = text.split(/\r?\n/);
+    const tail = lines.slice(-wantLines).join("\n");
+    return tail.trimEnd();
+  } catch {
+    return "";
+  } finally {
+    try {
+      if (fd) await fd.close();
+    } catch {}
+  }
+}
+
+async function startJobProcess({ conversationKey, session, command, workdir }) {
+  const cmd = String(command || "").trim();
+  if (!cmd) return { ok: false, error: "missing command", job: null };
+  if (cmd.length > 4000) return { ok: false, error: "command too long", job: null };
+
+  const absWorkdir = path.resolve(workdir || session.workdir || CONFIG.defaultWorkdir);
+  const jobId = newJobId();
+  const dir = jobStorageJobDir(conversationKey, jobId);
+  const logPath = jobLogPath(conversationKey, jobId);
+  const exitCodeFile = jobExitCodePath(conversationKey, jobId);
+  const pidFile = jobPidPath(conversationKey, jobId);
+
+  try {
+    await fsp.mkdir(dir, { recursive: true });
+  } catch (err) {
+    return { ok: false, error: `failed creating job dir: ${String(err.message || err)}`, job: null };
+  }
+  try {
+    await fsp.writeFile(path.join(dir, "command.txt"), `${cmd}\n`, "utf8");
+  } catch {}
+
+  // Wrapper writes PID + exit_code to files so watches can recover after relay restarts.
+  const wrapper = [
+    "set -u",
+    'JOB_DIR="$1"',
+    'WORKDIR="$2"',
+    'LOG="$3"',
+    'EXIT_CODE_FILE="$4"',
+    'PID_FILE="$5"',
+    'CMD="$6"',
+    'mkdir -p "$JOB_DIR"',
+    'echo $$ > "$PID_FILE"',
+    'cd "$WORKDIR" || exit 1',
+    'exec >>"$LOG" 2>&1',
+    'ts="$(date -Is 2>/dev/null || date)"',
+    'echo "[job] started_at=$ts"',
+    'echo "[job] workdir=$WORKDIR"',
+    'echo "[job] command=$CMD"',
+    'term_handler() { echo "[job] received SIGTERM"; echo 143 > "$EXIT_CODE_FILE"; exit 143; }',
+    'int_handler() { echo "[job] received SIGINT"; echo 130 > "$EXIT_CODE_FILE"; exit 130; }',
+    "trap term_handler TERM",
+    "trap int_handler INT",
+    'bash -lc "$CMD"',
+    "code=$?",
+    'echo "$code" > "$EXIT_CODE_FILE"',
+    'echo "[job] finished exit_code=$code"',
+    'exit "$code"',
+  ].join("; ");
+
+  let child;
+  try {
+    child = spawn(
+      "bash",
+      ["-lc", wrapper, "bash", dir, absWorkdir, logPath, exitCodeFile, pidFile, cmd],
+      { detached: true, stdio: "ignore" }
+    );
+    child.unref();
+  } catch (err) {
+    return { ok: false, error: `spawn failed: ${String(err.message || err)}`, job: null };
+  }
+
+  const job = {
+    id: jobId,
+    command: cmd,
+    workdir: absWorkdir,
+    status: "running",
+    startedAt: nowIso(),
+    finishedAt: null,
+    pid: child && typeof child.pid === "number" ? child.pid : null,
+    jobDir: dir,
+    logPath,
+    exitCodePath: exitCodeFile,
+    pidPath: pidFile,
+    exitCode: null,
+    watch: null,
+  };
+  ensureJobsShape(session);
+  session.jobs.push(job);
+  session.updatedAt = nowIso();
+  await queueSaveState();
+  logRelayEvent("job.start", { conversationKey, jobId, pid: job.pid || null, workdir: absWorkdir });
+  return { ok: true, error: "", job };
+}
+
+function jobWatcherKey(conversationKey, jobId) {
+  return `${String(conversationKey || "")}::${String(jobId || "")}`;
+}
+
+function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault } = {}) {
+  const watch = rawWatch && typeof rawWatch === "object" && !Array.isArray(rawWatch) ? rawWatch : null;
+  const everySec =
+    watch && watch.everySec != null ? Number(watch.everySec) : Number(everySecDefault != null ? everySecDefault : 300);
+  const tailLines =
+    watch && watch.tailLines != null ? Number(watch.tailLines) : Number(tailLinesDefault != null ? tailLinesDefault : 50);
+  const thenTask = watch && watch.thenTask != null ? String(watch.thenTask || "").trim() : "";
+  const runTasks = Boolean(watch && watch.runTasks);
+
+  return {
+    enabled: true,
+    everySec: Number.isFinite(everySec) ? Math.max(1, Math.min(86400, Math.floor(everySec))) : 300,
+    tailLines: Number.isFinite(tailLines) ? Math.max(1, Math.min(500, Math.floor(tailLines))) : 50,
+    thenTask: thenTask ? (thenTask.length > 2000 ? thenTask.slice(0, 2000) : thenTask) : null,
+    runTasks,
+  };
+}
+
+async function resolveChannelForWatch(channelId) {
+  const id = String(channelId || "").trim();
+  if (!id) return null;
+  const client = DISCORD_CLIENT;
+  if (!client) return null;
+  try {
+    const ch = await client.channels.fetch(id);
+    if (!ch || typeof ch.send !== "function") return null;
+    return ch;
+  } catch {
+    return null;
+  }
+}
+
+async function stopJobWatcher(conversationKey, jobId) {
+  const key = jobWatcherKey(conversationKey, jobId);
+  const watcher = jobWatchersByKey.get(key);
+  if (!watcher) return false;
+  try {
+    if (watcher.timer) clearInterval(watcher.timer);
+  } catch {}
+  jobWatchersByKey.delete(key);
+  return true;
+}
+
+async function maybeStartTaskRunner(conversationKey, channel, session, meta) {
+  if (taskRunnerByConversation.has(conversationKey)) return { ok: true, started: false };
+  const next = findNextPendingTask(session);
+  if (!next) return { ok: true, started: false };
+  ensureTaskLoopShape(session);
+  session.taskLoop.running = true;
+  session.taskLoop.stopRequested = false;
+  session.taskLoop.currentTaskId = null;
+  session.updatedAt = nowIso();
+  await queueSaveState();
+  taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
+  try {
+    if (channel) await channel.send("Task runner started.");
+  } catch {}
+  void kickTaskRunner(conversationKey, channel, session, meta);
+  return { ok: true, started: true };
+}
+
+async function tickJobWatcher(watcher) {
+  if (!watcher || typeof watcher !== "object") return;
+  if (watcher.inFlight) return;
+  watcher.inFlight = true;
+  const { conversationKey, jobId, channelId } = watcher;
+
+  try {
+    await enqueueConversation(conversationKey, async () => {
+      const session = getSession(conversationKey);
+      ensureJobsShape(session);
+      ensureTasksShape(session);
+      ensureTaskLoopShape(session);
+
+      const job = (session.jobs || []).find((j) => j && typeof j === "object" && String(j.id || "") === String(jobId));
+      if (!job) {
+        await stopJobWatcher(conversationKey, jobId);
+        return;
+      }
+
+      const exitRes = await readJobExitCode(job.exitCodePath);
+      const startedAtMs = Date.parse(job.startedAt || "") || Date.now();
+      const elapsed = formatElapsed(Date.now() - startedAtMs);
+      const tail = await readTailLines(job.logPath, watcher.tailLines, 128 * 1024);
+      const tailHash = crypto.createHash("sha1").update(tail).digest("hex").slice(0, 12);
+      const changed = watcher.lastTailHash !== tailHash;
+      watcher.lastTailHash = tailHash;
+
+      const ch = await resolveChannelForWatch(channelId);
+      const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})`;
+
+      if (exitRes.ok) {
+        // Mark job finished.
+        const code = exitRes.code;
+        job.exitCode = code;
+        if (job.status === "running") {
+          job.status = code === 0 ? "done" : "failed";
+        }
+        job.finishedAt = job.finishedAt || nowIso();
+        if (job.watch && typeof job.watch === "object") {
+          job.watch.enabled = false;
+        }
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        await stopJobWatcher(conversationKey, jobId);
+
+        const lines = [];
+        lines.push(`${header} -> finished (exit ${code})`);
+        if (tail) {
+          lines.push("", "log tail:", tail);
+        }
+        if (ch) await sendLongToChannel(ch, lines.join("\n"));
+
+        // Integrate with /task as requested.
+        const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
+        const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
+        const runTasks = Boolean(watch && watch.runTasks);
+        if (thenTask) {
+          if (!CONFIG.tasksEnabled) {
+            if (ch) await ch.send("Job follow-up task requested, but tasks are disabled (RELAY_TASKS_ENABLED=false).");
+            return;
+          }
+          const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
+          if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+            if (ch) await ch.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
+            return;
+          }
+          const task = createTask(session, thenTask);
+          session.tasks.push(task);
+          session.updatedAt = nowIso();
+          await queueSaveState();
+          logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
+          if (ch) await ch.send(`Queued follow-up task \`${task.id}\`.`);
+
+          if (runTasks) {
+            await maybeStartTaskRunner(conversationKey, ch, session, {
+              isDm: !session.lastGuildId,
+              isThread: Boolean(ch && ch.isThread && ch.isThread()),
+            });
+          }
+        }
+
+        return;
+      }
+
+      // Still running (best-effort).
+      if (job.status !== "running") job.status = "running";
+
+      if (!isPidRunning(job.pid) && !tail) {
+        // Wrapper ended but we don't have an exit_code yet; avoid spamming.
+        logRelayEvent("job.watch.warn", { conversationKey, jobId: job.id, pid: job.pid || null, note: "pid_not_running_and_no_exit_code" });
+        return;
+      }
+
+      if (!ch) return;
+      if (changed && tail) {
+        await sendLongToChannel(ch, [header, "", "log tail:", tail].join("\n"));
+      } else {
+        await ch.send(`${header} (no new output)`);
+      }
+    });
+  } catch (err) {
+    logRelayEvent("job.watch.error", {
+      conversationKey,
+      jobId,
+      error: String(err && err.message ? err.message : err).slice(0, 240),
+    });
+  } finally {
+    watcher.inFlight = false;
+  }
+}
+
+async function startJobWatcher({ conversationKey, session, job, channelId, watchConfig }) {
+  if (!job || typeof job !== "object") return { ok: false, error: "missing job" };
+  const normalized = normalizeJobWatchConfig(watchConfig, {
+    everySecDefault: CONFIG.jobsAutoWatchEverySec,
+    tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+  });
+
+  job.watch = { ...normalized };
+  session.updatedAt = nowIso();
+  await queueSaveState();
+
+  const key = jobWatcherKey(conversationKey, job.id);
+  const existing = jobWatchersByKey.get(key);
+  if (existing && existing.timer) {
+    try { clearInterval(existing.timer); } catch {}
+  }
+  const watcher = {
+    conversationKey,
+    jobId: job.id,
+    channelId: String(channelId || "").trim() || (session.lastChannelId || ""),
+    tailLines: normalized.tailLines,
+    everySec: normalized.everySec,
+    inFlight: false,
+    lastTailHash: "",
+    timer: null,
+  };
+  watcher.timer = setInterval(() => void tickJobWatcher(watcher), watcher.everySec * 1000);
+  watcher.timer.unref?.();
+  jobWatchersByKey.set(key, watcher);
+  void tickJobWatcher(watcher);
+  logRelayEvent("job.watch.start", { conversationKey, jobId: job.id, everySec: watcher.everySec, tailLines: watcher.tailLines });
+  return { ok: true, watcher };
+}
+
+async function restoreJobWatchers() {
+  // Restore watches from persisted session state after relay restart.
+  let restored = 0;
+  for (const [conversationKey, session] of Object.entries(state.sessions || {})) {
+    if (!session || typeof session !== "object") continue;
+    ensureJobsShape(session);
+    const channelId = String(session.lastChannelId || "").trim();
+    if (!channelId) continue;
+    for (const job of session.jobs || []) {
+      if (!job || typeof job !== "object") continue;
+      if (job.status !== "running") continue;
+      const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
+      if (!watch || !watch.enabled) continue;
+      const key = jobWatcherKey(conversationKey, job.id);
+      if (jobWatchersByKey.has(key)) continue;
+      const res = await startJobWatcher({
+        conversationKey,
+        session,
+        job,
+        channelId,
+        watchConfig: watch,
+      });
+      if (res && res.ok) restored += 1;
+    }
+  }
+  if (restored > 0) {
+    logRelayEvent("job.watch.restore", { restored });
+  }
+}
+
 async function writePlanFile(conversationKey, planId, planText) {
   const dir = planStorageDir(conversationKey);
   await fsp.mkdir(dir, { recursive: true });
@@ -2167,6 +2907,204 @@ function requestStopConversation(conversationKey, session) {
   return true;
 }
 
+function shouldAllowAgentActions({ isDm, session }) {
+  if (!CONFIG.agentActionsEnabled) {
+    return { ok: false, reason: "RELAY_AGENT_ACTIONS_ENABLED=false" };
+  }
+  if (CONFIG.agentActionsDmOnly && !isDm) {
+    return { ok: false, reason: "RELAY_AGENT_ACTIONS_DM_ONLY=true" };
+  }
+  ensureAutoShape(session);
+  if (session && session.auto && session.auto.actions === false) {
+    return { ok: false, reason: "conversation actions toggle is OFF (/auto actions off)" };
+  }
+  return { ok: true, reason: "" };
+}
+
+function findLatestJob(session, { requireRunning = false } = {}) {
+  ensureJobsShape(session);
+  const jobs = Array.isArray(session.jobs) ? session.jobs : [];
+  if (jobs.length === 0) return null;
+  if (requireRunning) {
+    for (let i = jobs.length - 1; i >= 0; i -= 1) {
+      const j = jobs[i];
+      if (j && typeof j === "object" && j.status === "running") return j;
+    }
+    return null;
+  }
+  return jobs[jobs.length - 1];
+}
+
+async function executeRelayActions({ actions, errors, conversationKey, session, channel, isDm, isThread }) {
+  const list = Array.isArray(actions) ? actions : [];
+  const errs = Array.isArray(errors) ? errors : [];
+
+  if (errs.length > 0) {
+    logRelayEvent("agent.actions.extract.warn", { conversationKey, errors: errs.slice(0, 5) });
+  }
+  if (list.length === 0) return { ok: true, executed: 0 };
+
+  const gate = shouldAllowAgentActions({ isDm, session });
+  if (!gate.ok) {
+    logRelayEvent("agent.actions.blocked", { conversationKey, reason: gate.reason, count: list.length });
+    try {
+      if (channel) await channel.send(`Agent requested relay actions, but they are blocked: ${gate.reason}`);
+    } catch {}
+    return { ok: false, executed: 0, error: gate.reason };
+  }
+
+  const allowed = CONFIG.agentActionsAllowed instanceof Set ? CONFIG.agentActionsAllowed : new Set();
+  const lines = [];
+  let executed = 0;
+
+  for (const action of list) {
+    if (!action || typeof action !== "object") continue;
+    const type = String(action.type || "").trim().toLowerCase();
+    if (!type) continue;
+    if (allowed.size > 0 && !allowed.has(type)) {
+      lines.push(`- blocked: \`${type}\` (not in RELAY_AGENT_ACTIONS_ALLOWED)`);
+      continue;
+    }
+
+    try {
+      if (type === "job_start") {
+        const existing = findLatestJob(session, { requireRunning: true });
+        if (existing) {
+          lines.push(`- job_start refused: job \`${existing.id}\` is still running`);
+          continue;
+        }
+        const cmd = String(action.command || "").trim();
+        const started = await startJobProcess({
+          conversationKey,
+          session,
+          command: cmd,
+          workdir: session.workdir || CONFIG.defaultWorkdir,
+        });
+        if (!started.ok) {
+          lines.push(`- job_start failed: ${started.error}`);
+          continue;
+        }
+        executed += 1;
+        const job = started.job;
+        lines.push(`- job_start: \`${job.id}\` (pid ${job.pid || "?"})`);
+
+        const wantWatch = action.watch || (CONFIG.jobsAutoWatch ? {} : null);
+        if (wantWatch) {
+          const watchCfg = normalizeJobWatchConfig(action.watch, {
+            everySecDefault: CONFIG.jobsAutoWatchEverySec,
+            tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+          });
+          const watchRes = await startJobWatcher({
+            conversationKey,
+            session,
+            job,
+            channelId: channel && channel.id ? String(channel.id) : session.lastChannelId,
+            watchConfig: watchCfg,
+          });
+          if (watchRes && watchRes.ok) {
+            lines.push(`  watching: everySec=${watchCfg.everySec} tailLines=${watchCfg.tailLines}`);
+          } else {
+            lines.push(`  watch failed`);
+          }
+        }
+        continue;
+      }
+
+      if (type === "job_watch") {
+        const job = findLatestJob(session, { requireRunning: true }) || findLatestJob(session, { requireRunning: false });
+        if (!job) {
+          lines.push("- job_watch failed: no job found");
+          continue;
+        }
+        const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
+          everySecDefault: CONFIG.jobsAutoWatchEverySec,
+          tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+        });
+        const res = await startJobWatcher({
+          conversationKey,
+          session,
+          job,
+          channelId: channel && channel.id ? String(channel.id) : session.lastChannelId,
+          watchConfig: watchCfg,
+        });
+        if (res && res.ok) {
+          executed += 1;
+          lines.push(`- job_watch: \`${job.id}\` everySec=${watchCfg.everySec} tailLines=${watchCfg.tailLines}`);
+        } else {
+          lines.push(`- job_watch failed: \`${job.id}\``);
+        }
+        continue;
+      }
+
+      if (type === "job_stop") {
+        const job = findLatestJob(session, { requireRunning: true });
+        if (!job) {
+          lines.push("- job_stop failed: no running job found");
+          continue;
+        }
+        const pid = job.pid;
+        const killed = pid ? killProcessGroup(pid, "SIGTERM") : false;
+        job.status = "canceled";
+        job.finishedAt = job.finishedAt || nowIso();
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        void stopJobWatcher(conversationKey, job.id);
+        executed += 1;
+        lines.push(`- job_stop: \`${job.id}\` (pid ${pid || "?"}) ${killed ? "SIGTERM sent" : "no pid"}`);
+        continue;
+      }
+
+      if (type === "task_add") {
+        if (!CONFIG.tasksEnabled) {
+          lines.push("- task_add blocked: RELAY_TASKS_ENABLED=false");
+          continue;
+        }
+        ensureTasksShape(session);
+        const pending = session.tasks.filter((t) => t && t.status === "pending").length;
+        if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+          lines.push(`- task_add blocked: queue full (pending=${pending}, max=${CONFIG.tasksMaxPending})`);
+          continue;
+        }
+        const task = createTask(session, String(action.text || ""));
+        session.tasks.push(task);
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        executed += 1;
+        lines.push(`- task_add: \`${task.id}\``);
+        continue;
+      }
+
+      if (type === "task_run") {
+        if (!CONFIG.tasksEnabled) {
+          lines.push("- task_run blocked: RELAY_TASKS_ENABLED=false");
+          continue;
+        }
+        ensureTasksShape(session);
+        ensureTaskLoopShape(session);
+        const res = await maybeStartTaskRunner(conversationKey, channel, session, { isDm, isThread });
+        executed += 1;
+        lines.push(`- task_run: ${res && res.started ? "started" : "noop"}`);
+        continue;
+      }
+    } catch (err) {
+      lines.push(`- ${type} error: ${String(err && err.message ? err.message : err).slice(0, 200)}`);
+      logRelayEvent("agent.actions.exec.error", {
+        conversationKey,
+        type,
+        error: String(err && err.message ? err.message : err).slice(0, 240),
+      });
+    }
+  }
+
+  logRelayEvent("agent.actions.executed", { conversationKey, executed, requested: list.length });
+  if (lines.length > 0) {
+    try {
+      if (channel) await sendLongToChannel(channel, ["Relay actions:", ...lines].join("\n"));
+    } catch {}
+  }
+  return { ok: true, executed };
+}
+
 async function runAgentAndPostToDiscord({
   baseMessage,
   channel,
@@ -2331,6 +3269,14 @@ async function runAgentAndPostToDiscord({
 
       let answer = result.text || "No response.";
       let uploadPaths = [];
+      let relayActions = [];
+      let relayActionErrors = [];
+      {
+        const extracted = extractRelayActions(answer, { maxActions: CONFIG.agentActionsMaxPerMessage });
+        answer = extracted.text;
+        relayActions = extracted.actions || [];
+        relayActionErrors = extracted.errors || [];
+      }
       if (CONFIG.uploadEnabled) {
         const parsed = extractUploadMarkers(answer);
         answer = parsed.text;
@@ -2364,6 +3310,18 @@ async function runAgentAndPostToDiscord({
         if (errors.length > 0) {
           await channel.send(`Upload notes:\n${errors.map((e) => `- ${e}`).join("\n")}`);
         }
+      }
+
+      if (relayActions.length > 0 || relayActionErrors.length > 0) {
+        await executeRelayActions({
+          actions: relayActions,
+          errors: relayActionErrors,
+          conversationKey,
+          session,
+          channel,
+          isDm,
+          isThread,
+        });
       }
 
       return { ok: true, threadId: session.threadId || null, text: answer };
@@ -3056,6 +4014,7 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/worktree <subcmd>` - manage git worktrees (list/new/use/rm/prune)",
         "`/plan <subcmd>` - manage plans (new/list/show/queue/apply)",
         "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
+        "`/auto <subcmd>` - per-conversation automation toggles (actions on|off)",
       ].join("\n")
     );
     return true;
@@ -3107,6 +4066,45 @@ async function handleCommand(message, session, command, conversationKey) {
       }
     }
     await sendLongReply(message, lines.join("\n"));
+    return true;
+  }
+
+  if (command.name === "auto") {
+    ensureAutoShape(session);
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = subRaw.toLowerCase();
+    if (!sub) {
+      const lines = [];
+      lines.push("Usage:");
+      lines.push("- `/auto actions on|off`");
+      lines.push("");
+      lines.push(
+        `agent_actions: enabled=${CONFIG.agentActionsEnabled} dm_only=${CONFIG.agentActionsDmOnly} allowed=${Array.from(
+          CONFIG.agentActionsAllowed || []
+        )
+          .sort()
+          .join(",") || "(none)"} max_per_message=${CONFIG.agentActionsMaxPerMessage}`
+      );
+      lines.push(`conversation_actions: ${session.auto && session.auto.actions ? "on" : "off"}`);
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+    if (sub !== "actions") {
+      await message.reply("Usage: `/auto actions on|off`");
+      return true;
+    }
+    const mode = String(rest || "").trim().toLowerCase();
+    if (mode !== "on" && mode !== "off") {
+      await message.reply("Usage: `/auto actions on|off`");
+      return true;
+    }
+    session.auto.actions = mode === "on";
+    session.updatedAt = nowIso();
+    await queueSaveState();
+    await message.reply(
+      `Conversation agent actions are now ${session.auto.actions ? "ON" : "OFF"}.` +
+        (CONFIG.agentActionsEnabled ? "" : " (Note: RELAY_AGENT_ACTIONS_ENABLED=false globally.)")
+    );
     return true;
   }
 
@@ -3871,9 +4869,15 @@ async function main() {
     partials: [Partials.Channel, Partials.Message],
     ...(DISCORD_REST_AGENT ? { rest: { agent: DISCORD_REST_AGENT } } : {}),
   });
+  DISCORD_CLIENT = client;
 
   client.once("clientReady", () => {
     console.log(`codex-discord-relay (${CONFIG.agentProvider}) connected as ${client.user.tag}`);
+    restoreJobWatchers().catch((err) =>
+      logRelayEvent("job.watch.restore.error", {
+        error: String(err && err.message ? err.message : err).slice(0, 240),
+      })
+    );
   });
 
   client.on("messageCreate", async (message) => {
@@ -3921,6 +4925,15 @@ async function main() {
 
       const key = getConversationKey(message);
       const session = getSession(key);
+      // Track last channel so background watchers can post updates after restarts.
+      const channelId = message.channel && message.channel.id ? String(message.channel.id) : String(message.channelId || "");
+      const guildId = message.guildId ? String(message.guildId) : null;
+      if ((channelId && session.lastChannelId !== channelId) || session.lastGuildId !== guildId) {
+        session.lastChannelId = channelId || session.lastChannelId || null;
+        session.lastGuildId = guildId;
+        session.updatedAt = nowIso();
+        void queueSaveState();
+      }
 
       const command = parseCommand(prompt);
       if (command) {

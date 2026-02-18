@@ -7,6 +7,7 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
 - Replies in DMs. In guild channels it replies when mentioned; in threads it can auto-respond without mention (see `RELAY_THREAD_AUTO_RESPOND`).
 - Persists an agent session id per Discord conversation.
 - Queues messages per conversation to avoid overlap.
+- (Optional) Allows the agent to request relay-side actions (e.g. start/watch a long-running shell job) via a `[[relay-actions]]...[[/relay-actions]]` JSON block (disabled by default; DM-only by default).
 - Supports two backends via `RELAY_AGENT_PROVIDER`:
   - `codex` (default): uses `codex exec` / `codex exec resume`
   - `claude`: uses `claude -p --output-format json --resume`
@@ -22,6 +23,7 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/worktree ...`
   - `/plan ...`
   - `/handoff ...`
+  - `/auto ...`
   - `/help`
 
 ## Setup
@@ -106,6 +108,7 @@ codex-discord-relay-multictl logs default
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
 - `/task ...` is a persistent per-conversation task queue with an auto-runner ("Ralph loop"). Tune with `RELAY_TASKS_ENABLED`, `RELAY_TASKS_MAX_PENDING`, `RELAY_TASKS_STOP_ON_ERROR`, `RELAY_TASKS_POST_FULL_OUTPUT`.
 - `/worktree ...` manages `git worktree` under `RELAY_WORKTREE_ROOT_DIR` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`).
+- Agent relay actions (jobs): when enabled, the agent can output a `[[relay-actions]]...[[/relay-actions]]` JSON block to ask the relay to start/watch/stop a long-running shell job. This is gated by `RELAY_AGENT_ACTIONS_*` (disabled by default; DM-only by default). Job logs are stored under `$RELAY_STATE_DIR/jobs/<conversationKey>/<jobId>/job.log`.
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - Image uploads: Codex can ask the relay to upload a local image by including `[[upload:some.png]]` in its response (or you can use `/upload some.png`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`.
@@ -113,6 +116,45 @@ codex-discord-relay-multictl logs default
 - If Discord is blocked on your network, the relay supports proxies via `DISCORD_GATEWAY_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`.
   It will also automatically source `/root/.openclaw/proxy.env` when starting (same proxy config used by OpenClaw).
 - `/attach` is **DM-only by default**. Set `RELAY_ATTACH_ALLOW_GUILDS=true` if you intentionally want to allow attaching sessions in guild channels.
+
+## Agent Relay Actions (Jobs)
+
+The relay can execute a small set of allowlisted actions requested by the agent itself (for long-running training jobs).
+
+Marker syntax (agent output):
+
+```text
+[[relay-actions]]
+{"actions":[
+  {"type":"job_start",
+   "command":"python train.py --config cfg.yaml",
+   "watch":{"everySec":300,"tailLines":50,
+            "thenTask":"Analyze results and write a short report in HANDOFF_LOG.md",
+            "runTasks":true}
+  }
+]}
+[[/relay-actions]]
+```
+
+Notes:
+
+- The relay removes the `[[relay-actions]]...[[/relay-actions]]` block before posting the agent's visible reply.
+- Actions are executed after posting, inside the per-conversation queue.
+- Watchers post periodic updates and can enqueue a follow-up `/task` when the job finishes.
+
+Controls:
+
+- `/auto actions on|off`: per-conversation toggle (defaults to `on` when global actions are enabled).
+
+Env knobs:
+
+- `RELAY_AGENT_ACTIONS_ENABLED=true|false` (default `false`)
+- `RELAY_AGENT_ACTIONS_DM_ONLY=true|false` (default `true`)
+- `RELAY_AGENT_ACTIONS_ALLOWED=job_start,job_stop,job_watch` (default: `job_*` only)
+- `RELAY_AGENT_ACTIONS_MAX_PER_MESSAGE=<int>` (default `1`)
+- `RELAY_JOBS_AUTO_WATCH=true|false` (default `true` only if actions enabled)
+- `RELAY_JOBS_AUTO_WATCH_EVERY_SEC=<int>` (default `300`)
+- `RELAY_JOBS_AUTO_WATCH_TAIL_LINES=<int>` (default `50`)
 
 ## Task Queue (Ralph Loop)
 

@@ -582,3 +582,12 @@ Training status: inactive (no active training run, epoch/metrics N/A).
   - node --check codex-discord-relay/relay.js (toolkit and live)
   - bash -n scripts/install_codex_discord_relay.sh
   - running relay env confirms: CODEX_SANDBOX=danger-full-access, CODEX_APPROVAL=never
+
+[2026-02-18T15:09:55+08:00] owner=codex objective=Incoming Discord text attachments (major action)
+- Implemented: auto-download small text attachments and auto-inject their contents into the agent prompt.
+  - Stored under per-conversation: <upload_dir>/attachments/
+  - Injection block: [Discord Attachments]
+  - Messages with no text but a text attachment now run with an auto prompt.
+- Added runtime context bullet so agents know attachments are injected and where they are saved.
+- Commit pushed: f59766e
+- Live deployed: /root/codex-discord-relay/relay.js updated from toolkit; relays restarted.

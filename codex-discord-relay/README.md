@@ -107,6 +107,7 @@ codex-discord-relay-multictl logs default
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - Image uploads: Codex can ask the relay to upload a local image by including `[[upload:some.png]]` in its response (or you can use `/upload some.png`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`.
+- Incoming text attachments: when you attach a small text file in Discord (e.g. `.md`, `.txt`, `.json`), the relay downloads it into `<upload_dir>/attachments/` and appends its contents to the prompt automatically. Tune with `RELAY_DISCORD_ATTACHMENTS_*`.
 - If Discord is blocked on your network, the relay supports proxies via `DISCORD_GATEWAY_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`.
   It will also automatically source `/root/.openclaw/proxy.env` when starting (same proxy config used by OpenClaw).
 - `/attach` is **DM-only by default**. Set `RELAY_ATTACH_ALLOW_GUILDS=true` if you intentionally want to allow attaching sessions in guild channels.

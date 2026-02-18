@@ -2085,8 +2085,27 @@ async function runAgentAndPostToDiscord({
         );
 
       const uploadDir = getConversationUploadDir(conversationKey);
-      if (CONFIG.uploadEnabled) {
+      if (CONFIG.uploadEnabled || CONFIG.discordAttachmentsEnabled) {
         await fsp.mkdir(uploadDir, { recursive: true });
+      }
+
+      let userPrompt = prompt;
+      let attachmentMeta = null;
+      if (CONFIG.discordAttachmentsEnabled && baseMessage) {
+        const ingested = await ingestDiscordTextAttachments(
+          baseMessage,
+          conversationKey,
+          uploadDir,
+          (line) => progress.note(line)
+        );
+        attachmentMeta = ingested;
+        if (ingested && ingested.injectedText) {
+          const block = `[Discord Attachments]\n${ingested.injectedText}`;
+          userPrompt = userPrompt ? `${userPrompt}\n\n${block}` : block;
+          progress.note(`Loaded ${ingested.includedFiles}/${ingested.totalCandidates} attachment(s)`);
+        } else if (ingested && ingested.totalCandidates > 0) {
+          progress.note(`No attachments injected (saved=${ingested.savedPaths.length}, errors=${ingested.errors.length})`);
+        }
       }
 
       logRelayEvent("agent.run.start", {
@@ -2095,12 +2114,14 @@ async function runAgentAndPostToDiscord({
         sessionId: session.threadId || null,
         workdir: session.workdir || CONFIG.defaultWorkdir,
         reason: runLabel,
+        discordAttachmentsCandidates: attachmentMeta ? attachmentMeta.totalCandidates : 0,
+        discordAttachmentsSaved: attachmentMeta ? attachmentMeta.savedPaths.length : 0,
       });
 
       let contextInjected = false;
       let result;
       try {
-        const firstPrompt = await buildAgentPrompt(session, prompt, {
+        const firstPrompt = await buildAgentPrompt(session, userPrompt, {
           conversationKey,
           uploadDir,
           isDm,
@@ -2149,7 +2170,7 @@ async function runAgentAndPostToDiscord({
           staleSessionId: staleThreadId,
         });
         progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
-        const retryPrompt = await buildAgentPrompt(session, prompt, {
+        const retryPrompt = await buildAgentPrompt(session, userPrompt, {
           conversationKey,
           uploadDir,
           isDm,
@@ -3425,14 +3446,18 @@ async function main() {
         if (!mentioned && !(isThread && CONFIG.threadAutoRespond)) return;
       }
 
-      const prompt = extractPrompt(message, client.user.id);
-      if (!prompt) {
+      let prompt = extractPrompt(message, client.user.id);
+      const hasTextAttachments = hasProbablyTextAttachments(message);
+      if (!prompt && !hasTextAttachments) {
         await message.reply(
           isDm || (isThread && CONFIG.threadAutoRespond)
             ? "Send a prompt, or use `/help`."
             : "Send a prompt after mentioning me, or use `/help`."
         );
         return;
+      }
+      if (!prompt && hasTextAttachments) {
+        prompt = "Please read and follow the attached file(s).";
       }
 
       // Make sure the bot is joined to threads before trying to type/reply.

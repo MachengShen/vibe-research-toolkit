@@ -77,6 +77,14 @@ function parseCsv(value) {
   );
 }
 
+function parseSemiList(value) {
+  if (!value) return [];
+  return String(value)
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function boolEnv(name, fallback) {
   const raw = process.env[name];
   if (raw == null) return fallback;
@@ -218,6 +226,19 @@ const CONFIG = {
   uploadMaxFiles: Math.max(0, intEnv("RELAY_UPLOAD_MAX_FILES", 3)),
   uploadMaxBytes: Math.max(0, intEnv("RELAY_UPLOAD_MAX_BYTES", 8 * 1024 * 1024)),
 
+  discordAttachmentsEnabled: boolEnv("RELAY_DISCORD_ATTACHMENTS_ENABLED", true),
+  discordAttachmentsMaxFiles: Math.max(0, intEnv("RELAY_DISCORD_ATTACHMENTS_MAX_FILES", 3)),
+  discordAttachmentsMaxBytes: Math.max(0, intEnv("RELAY_DISCORD_ATTACHMENTS_MAX_BYTES", 256 * 1024)),
+  discordAttachmentsMaxChars: Math.max(200, intEnv("RELAY_DISCORD_ATTACHMENTS_MAX_CHARS", 20000)),
+  discordAttachmentsMaxCharsPerFile: Math.max(
+    200,
+    intEnv("RELAY_DISCORD_ATTACHMENTS_MAX_CHARS_PER_FILE", 8000)
+  ),
+  discordAttachmentsDownloadTimeoutMs: Math.max(
+    1000,
+    intEnv("RELAY_DISCORD_ATTACHMENTS_DOWNLOAD_TIMEOUT_MS", 15000)
+  ),
+
   contextEnabled: boolEnv("RELAY_CONTEXT_ENABLED", true),
   contextEveryTurn: boolEnv("RELAY_CONTEXT_EVERY_TURN", false),
   contextVersion: Math.max(1, intEnv("RELAY_CONTEXT_VERSION", 1)),
@@ -235,6 +256,20 @@ const CONFIG = {
 
   worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
   worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
+
+  plansEnabled: boolEnv("RELAY_PLANS_ENABLED", true),
+  plansMaxHistory: Math.max(1, intEnv("RELAY_PLANS_MAX_HISTORY", 20)),
+
+  handoffEnabled: boolEnv("RELAY_HANDOFF_ENABLED", true),
+  handoffAutoEnabled: boolEnv("RELAY_HANDOFF_AUTO_ENABLED", false),
+  handoffFiles: (() => {
+    const raw = (process.env.RELAY_HANDOFF_FILES || "").trim();
+    const files = raw ? parseSemiList(raw) : ["HANDOFF_LOG.md", "docs/WORKING_MEMORY.md"];
+    return files.map((p) => String(p || "").trim()).filter(Boolean);
+  })(),
+  handoffGitAutoCommit: boolEnv("RELAY_HANDOFF_GIT_AUTO_COMMIT", false),
+  handoffGitAutoPush: boolEnv("RELAY_HANDOFF_GIT_AUTO_PUSH", false),
+  handoffGitCommitMessage: (process.env.RELAY_HANDOFF_GIT_COMMIT_MESSAGE || "chore: relay handoff").trim(),
 
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
@@ -299,6 +334,33 @@ function isAllowedWorkdir(workdir) {
 }
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const TEXT_EXTS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".csv",
+  ".tsv",
+  ".log",
+  ".env",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".xml",
+  ".html",
+  ".css",
+  ".js",
+  ".ts",
+  ".py",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".patch",
+  ".diff",
+]);
 
 function safeUploadDirName(key) {
   return String(key || "")
@@ -419,6 +481,269 @@ async function resolveAndValidateUploads(conversationKey, rawPaths) {
   return { conversationDir, files, errors };
 }
 
+function listDiscordAttachments(message) {
+  if (!message || !message.attachments || typeof message.attachments.values !== "function") return [];
+  return Array.from(message.attachments.values());
+}
+
+function isProbablyTextAttachment(attachment) {
+  if (!attachment || typeof attachment !== "object") return false;
+  const name = String(attachment.name || "").trim();
+  const contentType = String(attachment.contentType || "").trim().toLowerCase();
+  const ext = path.extname(name).toLowerCase();
+  if (TEXT_EXTS.has(ext)) return true;
+  if (contentType.startsWith("text/")) return true;
+  if (
+    contentType.includes("json") ||
+    contentType.includes("yaml") ||
+    contentType.includes("toml") ||
+    contentType.includes("xml") ||
+    contentType.includes("csv")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function hasProbablyTextAttachments(message) {
+  if (!CONFIG.discordAttachmentsEnabled) return false;
+  const atts = listDiscordAttachments(message);
+  return atts.some((att) => isProbablyTextAttachment(att));
+}
+
+function sanitizeAttachmentFilename(rawName) {
+  let name = String(rawName || "").trim();
+  if (!name) name = "attachment.txt";
+  name = path.basename(name);
+  name = name.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!name) name = "attachment.txt";
+  if (name.length > 160) {
+    const ext = path.extname(name);
+    const keep = Math.max(1, 160 - ext.length);
+    name = `${name.slice(0, keep)}${ext}`;
+  }
+  return name;
+}
+
+function looksBinaryBytes(buf) {
+  if (!buf || typeof buf.length !== "number") return true;
+  if (buf.length === 0) return false;
+  const sampleLen = Math.min(buf.length, 8192);
+  let ctrl = 0;
+  for (let i = 0; i < sampleLen; i += 1) {
+    const b = buf[i];
+    if (b === 0) return true;
+    if (b === 9 || b === 10 || b === 13) continue;
+    if (b < 32 || b === 127) ctrl += 1;
+  }
+  return ctrl / sampleLen > 0.3;
+}
+
+function guessAttachmentTruncMode(filename) {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  if (ext === ".log") return "tail";
+  return "headtail";
+}
+
+function truncateAttachmentByMode(rawText, mode, maxChars) {
+  const text = String(rawText || "");
+  if (!text) return { text: "", truncated: false };
+  if (maxChars <= 0) return { text: "", truncated: text.length > 0 };
+  if (text.length <= maxChars) return { text, truncated: false };
+
+  const truncSuffix = "\n...[attachment truncated]";
+  const truncPrefix = "...[attachment truncated]\n";
+  const truncMiddleSuffix = "\n...[attachment truncated middle]";
+  const headTailJoiner = "\n...[snip]...\n";
+
+  const truncateHead = () => {
+    if (truncSuffix.length >= maxChars) return truncSuffix.slice(0, maxChars);
+    const keep = Math.max(0, maxChars - truncSuffix.length);
+    return `${text.slice(0, keep)}${truncSuffix}`;
+  };
+
+  const truncateTail = () => {
+    if (truncPrefix.length >= maxChars) return truncPrefix.slice(0, maxChars);
+    const keep = Math.max(0, maxChars - truncPrefix.length);
+    return `${truncPrefix}${text.slice(-keep)}`;
+  };
+
+  const truncateHeadTail = () => {
+    if (truncMiddleSuffix.length >= maxChars) return truncMiddleSuffix.slice(0, maxChars);
+    const bodyBudget = Math.max(0, maxChars - truncMiddleSuffix.length);
+    if (bodyBudget <= 0) return truncMiddleSuffix.slice(0, maxChars);
+
+    let body = "";
+    if (headTailJoiner.length >= bodyBudget) {
+      body = text.slice(0, bodyBudget);
+    } else {
+      const splitBudget = bodyBudget - headTailJoiner.length;
+      const headLen = Math.max(1, Math.floor(splitBudget / 2));
+      const tailLen = Math.max(1, splitBudget - headLen);
+      const head = text.slice(0, headLen);
+      const tail = text.slice(-tailLen);
+      body = `${head}${headTailJoiner}${tail}`;
+    }
+    if (body.length > bodyBudget) body = body.slice(0, bodyBudget);
+    return `${body}${truncMiddleSuffix}`;
+  };
+
+  if (mode === "tail") return { text: truncateTail(), truncated: true };
+  if (mode === "headtail") return { text: truncateHeadTail(), truncated: true };
+  return { text: truncateHead(), truncated: true };
+}
+
+async function fetchDiscordAttachmentBytes(url, timeoutMs) {
+  const rawUrl = String(url || "").trim();
+  if (!rawUrl) return { ok: false, error: "missing url", buf: Buffer.alloc(0) };
+
+  const controller = new AbortController();
+  const timer =
+    timeoutMs && timeoutMs > 0
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
+  try {
+    const res = await fetch(rawUrl, {
+      signal: controller.signal,
+      ...(DISCORD_REST_AGENT ? { dispatcher: DISCORD_REST_AGENT } : {}),
+    });
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}`, buf: Buffer.alloc(0) };
+    }
+    const ab = await res.arrayBuffer();
+    return { ok: true, error: "", buf: Buffer.from(ab) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err), buf: Buffer.alloc(0) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function ingestDiscordTextAttachments(message, conversationKey, uploadDir, onProgress) {
+  const out = {
+    ok: true,
+    injectedText: "",
+    includedFiles: 0,
+    totalCandidates: 0,
+    savedPaths: [],
+    errors: [],
+  };
+
+  if (!CONFIG.discordAttachmentsEnabled) return out;
+  const candidates = listDiscordAttachments(message).filter((att) => isProbablyTextAttachment(att));
+  out.totalCandidates = candidates.length;
+  if (candidates.length === 0) return out;
+
+  const maxFiles = Math.max(0, CONFIG.discordAttachmentsMaxFiles);
+  const selected = maxFiles > 0 ? candidates.slice(0, maxFiles) : [];
+  if (selected.length === 0) return out;
+
+  const attachmentsDir = path.join(uploadDir, "attachments");
+  try {
+    await fsp.mkdir(attachmentsDir, { recursive: true });
+  } catch (err) {
+    out.ok = false;
+    out.errors.push(`failed creating attachments dir: ${String(err.message || err)}`);
+    return out;
+  }
+
+  let remaining = Math.max(0, CONFIG.discordAttachmentsMaxChars);
+  const pieces = [];
+
+  for (const att of selected) {
+    const originalName = String(att.name || "attachment");
+    const safeName = sanitizeAttachmentFilename(originalName);
+    const url = String(att.url || "").trim();
+    const claimedBytes = Number(att.size || 0) || 0;
+    const contentType = String(att.contentType || "").trim() || "unknown";
+
+    if (!url) {
+      out.errors.push(`missing url for attachment: ${originalName}`);
+      continue;
+    }
+    if (CONFIG.discordAttachmentsMaxBytes > 0 && claimedBytes > CONFIG.discordAttachmentsMaxBytes) {
+      out.errors.push(
+        `attachment too large (claimed ${claimedBytes} bytes > max ${CONFIG.discordAttachmentsMaxBytes}): ${originalName}`
+      );
+      continue;
+    }
+
+    try {
+      if (typeof onProgress === "function") {
+        onProgress(`Downloading attachment: ${safeName} (${claimedBytes} bytes)`);
+      }
+      const fetched = await fetchDiscordAttachmentBytes(url, CONFIG.discordAttachmentsDownloadTimeoutMs);
+      if (!fetched.ok) {
+        out.errors.push(`failed downloading ${originalName}: ${fetched.error}`);
+        continue;
+      }
+      if (CONFIG.discordAttachmentsMaxBytes > 0 && fetched.buf.length > CONFIG.discordAttachmentsMaxBytes) {
+        out.errors.push(
+          `attachment too large (downloaded ${fetched.buf.length} bytes > max ${CONFIG.discordAttachmentsMaxBytes}): ${originalName}`
+        );
+        continue;
+      }
+      if (looksBinaryBytes(fetched.buf)) {
+        out.errors.push(`attachment appears non-text (skipped): ${originalName}`);
+        continue;
+      }
+
+      const uniquePrefix = `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      const savedPath = path.join(attachmentsDir, `${uniquePrefix}_${safeName}`);
+      await fsp.writeFile(savedPath, fetched.buf);
+      out.savedPaths.push(savedPath);
+
+      const sep = pieces.length > 0 ? "\n\n" : "";
+      const sepCost = sep.length;
+      if (remaining <= sepCost) continue;
+
+      const perFileBudget = Math.min(CONFIG.discordAttachmentsMaxCharsPerFile, remaining - sepCost);
+      if (perFileBudget <= 0) continue;
+
+      const header = [
+        `[Discord attachment: ${originalName}]`,
+        `saved_to: ${savedPath}`,
+        `size_bytes: ${fetched.buf.length}`,
+        `content_type: ${contentType}`,
+        "",
+      ].join("\n");
+      const bodyBudget = Math.max(0, perFileBudget - header.length);
+      if (bodyBudget <= 0) continue;
+
+      const decoded = fetched.buf.toString("utf8");
+      const mode = guessAttachmentTruncMode(originalName);
+      const truncated = truncateAttachmentByMode(decoded, mode, bodyBudget);
+      const chunk = `${header}${truncated.text}`;
+      pieces.push(`${sep}${chunk}`);
+      remaining -= sepCost + chunk.length;
+      out.includedFiles += 1;
+    } catch (err) {
+      out.errors.push(`attachment ingest error (${originalName}): ${String(err && err.message ? err.message : err)}`);
+      continue;
+    }
+  }
+
+  out.injectedText = pieces.join("");
+  if (out.errors.length > 0) {
+    logRelayEvent("discord.attachments.ingest.warn", {
+      conversationKey,
+      candidates: out.totalCandidates,
+      saved: out.savedPaths.length,
+      injectedFiles: out.includedFiles,
+      errors: out.errors.slice(0, 5),
+    });
+  } else {
+    logRelayEvent("discord.attachments.ingest.ok", {
+      conversationKey,
+      candidates: out.totalCandidates,
+      saved: out.savedPaths.length,
+      injectedFiles: out.includedFiles,
+    });
+  }
+  return out;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -508,11 +833,55 @@ function ensureTasksShape(session) {
   return changed;
 }
 
+function normalizePlanObject(plan, fallbackId) {
+  if (!plan || typeof plan !== "object") return false;
+  let changed = false;
+
+  if (typeof plan.id !== "string" || !plan.id.trim()) {
+    plan.id = String(fallbackId || `p-${Date.now()}`);
+    changed = true;
+  }
+  if (typeof plan.createdAt !== "string" || !plan.createdAt) {
+    plan.createdAt = nowIso();
+    changed = true;
+  }
+  if (plan.request != null && typeof plan.request !== "string") {
+    plan.request = String(plan.request || "");
+    changed = true;
+  }
+  if (typeof plan.text !== "string") {
+    plan.text = String(plan.text || "");
+    changed = true;
+  }
+  return changed;
+}
+
+function ensurePlansShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!Array.isArray(session.plans)) {
+    session.plans = [];
+    changed = true;
+  }
+  for (let i = 0; i < session.plans.length; i += 1) {
+    const plan = session.plans[i];
+    changed = normalizePlanObject(plan, `p-${String(i + 1).padStart(4, "0")}`) || changed;
+  }
+  // Keep the most recent plans.
+  const maxHistory = Math.max(1, Number(CONFIG.plansMaxHistory || 20));
+  if (session.plans.length > maxHistory) {
+    session.plans = session.plans.slice(-maxHistory);
+    changed = true;
+  }
+  return changed;
+}
+
 function normalizeSessionAfterLoad(session) {
   if (!session || typeof session !== "object") return false;
   let changed = false;
   changed = ensureTasksShape(session) || changed;
   changed = ensureTaskLoopShape(session) || changed;
+  changed = ensurePlansShape(session) || changed;
 
   // After a relay restart, there is no running in-memory runner/child. Reset any
   // in-flight task state so `/task list` doesn't show stuck tasks.
@@ -547,7 +916,7 @@ function normalizeSessionAfterLoad(session) {
 
 async function ensureStateLoaded() {
   await fsp.mkdir(CONFIG.stateDir, { recursive: true });
-  if (CONFIG.uploadEnabled) {
+  if (CONFIG.uploadEnabled || CONFIG.discordAttachmentsEnabled) {
     await fsp.mkdir(CONFIG.uploadRootDir, { recursive: true });
   }
   try {
@@ -891,6 +1260,7 @@ function getSession(key) {
   if (existing && typeof existing === "object") {
     ensureTasksShape(existing);
     ensureTaskLoopShape(existing);
+    ensurePlansShape(existing);
     return existing;
   }
   const created = {
@@ -900,6 +1270,7 @@ function getSession(key) {
     updatedAt: nowIso(),
     tasks: [],
     taskLoop: { running: false, stopRequested: false, currentTaskId: null },
+    plans: [],
   };
   state.sessions[key] = created;
   return created;
@@ -921,7 +1292,9 @@ function extractPrompt(message, botUserId) {
 }
 
 function parseCommand(prompt) {
-  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload|context|task|worktree)\b(?:\s+([\s\S]+))?$/i);
+  const match = prompt.match(
+    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff)\b(?:\s+([\s\S]+))?$/i
+  );
   if (!match) return null;
   return {
     name: match[1].toLowerCase(),
@@ -1112,9 +1485,17 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
   ];
+  if (CONFIG.discordAttachmentsEnabled) {
+    lines.push(
+      `- Incoming Discord text attachments: the relay downloads small text attachments to ${path.join(
+        uploadDir,
+        "attachments"
+      )} and appends their contents to the prompt.`
+    );
+  }
   if (CONFIG.uploadEnabled) {
     lines.push(
       "- File attachment bridge is enabled.",
@@ -1149,19 +1530,7 @@ async function buildAgentPrompt(session, userPrompt, meta) {
 function buildCodexArgs(session, prompt) {
   const args = ["exec"];
 
-  const appendSharedFlags = () => {
-    if (CONFIG.approvalPolicy) {
-      // Codex CLI doesn't expose an approval flag; set it through config.
-      args.push("-c", `approval_policy=${JSON.stringify(CONFIG.approvalPolicy)}`);
-    }
-    if (CONFIG.model) args.push("--model", CONFIG.model);
-    // Newer codex-cli builds no longer expose `--search` for `exec`.
-    // Keep CODEX_ENABLE_SEARCH behavior via config override instead.
-    if (CONFIG.enableSearch) args.push("-c", "features.web_search_request=true");
-    for (const override of CONFIG.configOverrides) {
-      args.push("-c", override);
-    }
-  };
+  const appendSharedFlags = () => appendCodexSharedFlags(args);
 
   if (session.threadId) {
     // For nested `exec resume`, `--sandbox` must be bound to `exec` (before `resume`).
@@ -1178,6 +1547,99 @@ function buildCodexArgs(session, prompt) {
     args.push("--json", prompt);
   }
   return args;
+}
+
+function appendCodexSharedFlags(args) {
+  if (!Array.isArray(args)) return;
+  if (CONFIG.approvalPolicy) {
+    // Codex CLI doesn't expose an approval flag for exec; set it through config override.
+    args.push("-c", `approval_policy=${JSON.stringify(CONFIG.approvalPolicy)}`);
+  }
+  if (CONFIG.model) args.push("--model", CONFIG.model);
+  // Newer codex-cli builds no longer expose `--search` for `exec`.
+  // Keep CODEX_ENABLE_SEARCH behavior via config override instead.
+  if (CONFIG.enableSearch) args.push("-c", "features.web_search_request=true");
+  for (const override of CONFIG.configOverrides) {
+    args.push("-c", override);
+  }
+}
+
+function buildCodexArgsStateless(workdir, prompt, { sandboxMode = "read-only" } = {}) {
+  const args = ["exec"];
+  if (CONFIG.skipGitRepoCheck) args.push("--skip-git-repo-check");
+  args.push("--cd", workdir || CONFIG.defaultWorkdir);
+  args.push("--sandbox", sandboxMode);
+  appendCodexSharedFlags(args);
+  args.push("--ephemeral");
+  args.push("--json", prompt);
+  return args;
+}
+
+async function runCodexWithArgs(args, { cwd, extraEnv, onProgress, conversationKey, label }) {
+  const env =
+    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
+  const child = spawn(CONFIG.codexBin, args, { cwd, env });
+  if (conversationKey) activeChildByConversation.set(conversationKey, child);
+
+  let threadId = null;
+  let finalText = "";
+  const stderrLines = [];
+  const rawStdoutLines = [];
+
+  const stdoutRl = readline.createInterface({ input: child.stdout });
+  const stderrRl = readline.createInterface({ input: child.stderr });
+  try {
+    stdoutRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const evt = JSON.parse(trimmed);
+        if (evt.type === "thread.started" && typeof evt.thread_id === "string") {
+          threadId = evt.thread_id;
+        }
+        if (
+          evt.type === "item.completed" &&
+          evt.item &&
+          evt.item.type === "agent_message" &&
+          typeof evt.item.text === "string"
+        ) {
+          finalText = evt.item.text;
+        }
+        const summary = summarizeCodexProgressEvent(evt);
+        if (summary) emitProgress(onProgress, summary);
+        return;
+      } catch {}
+      rawStdoutLines.push(trimmed);
+      if (rawStdoutLines.length > 80) rawStdoutLines.shift();
+    });
+
+    stderrRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      stderrLines.push(trimmed);
+      if (stderrLines.length > 80) stderrLines.shift();
+    });
+
+    const exitCode = await waitForChildExit(child, label || "codex");
+    if (exitCode !== 0) {
+      const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-20).join("\n");
+      throw new Error(`codex exit ${exitCode}\n${detail}`.trim());
+    }
+    if (!finalText) {
+      finalText = rawStdoutLines.join("\n").trim() || "No message returned by Codex.";
+    }
+    return { threadId, text: finalText };
+  } finally {
+    try {
+      stdoutRl.close();
+    } catch {}
+    try {
+      stderrRl.close();
+    } catch {}
+    if (conversationKey && activeChildByConversation.get(conversationKey) === child) {
+      activeChildByConversation.delete(conversationKey);
+    }
+  }
 }
 
 function waitForChildExit(child, label) {
@@ -1449,6 +1911,63 @@ function taskTextPreview(text, maxLen = 60) {
   if (!raw) return "";
   if (raw.length <= maxLen) return raw;
   return `${raw.slice(0, maxLen - 1)}…`;
+}
+
+function nextPlanId(session) {
+  const plans = session && Array.isArray(session.plans) ? session.plans : [];
+  let max = 0;
+  for (const p of plans) {
+    if (!p || typeof p !== "object") continue;
+    const m = String(p.id || "").match(/^p-(\d{4})$/);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return `p-${String(max + 1).padStart(4, "0")}`;
+}
+
+function createPlan(session, request, text) {
+  const id = nextPlanId(session);
+  return {
+    id,
+    createdAt: nowIso(),
+    request: String(request || "").trim() || null,
+    text: String(text || ""),
+  };
+}
+
+function findPlan(session, idOrLast) {
+  if (!session || !Array.isArray(session.plans) || session.plans.length === 0) return null;
+  const needle = String(idOrLast || "").trim().toLowerCase();
+  if (!needle || needle === "last" || needle === "latest") return session.plans[session.plans.length - 1];
+  return session.plans.find((p) => p && typeof p === "object" && String(p.id || "").toLowerCase() === needle) || null;
+}
+
+function parsePlanSteps(planText) {
+  const raw = String(planText || "");
+  const lines = raw.split(/\r?\n/);
+  const steps = [];
+
+  // Preferred: markdown task list.
+  for (const line of lines) {
+    const m = line.match(/^\s*-\s*\[\s*\]\s+(.+?)\s*$/);
+    if (m) steps.push(m[1]);
+  }
+  if (steps.length > 0) return steps;
+
+  // Fallback: numbered list.
+  for (const line of lines) {
+    const m = line.match(/^\s*\d{1,3}[\.)]\s+(.+?)\s*$/);
+    if (m) steps.push(m[1]);
+  }
+  if (steps.length > 0) return steps;
+
+  // Last resort: non-empty bullets.
+  for (const line of lines) {
+    const m = line.match(/^\s*-\s+(.+?)\s*$/);
+    if (m) steps.push(m[1]);
+  }
+  return steps;
 }
 
 function nextTaskId(session) {
@@ -2036,7 +2555,152 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
         `Task runner stopped. pending=${counts.pending} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`
       );
     } catch {}
+
+    if (CONFIG.handoffAutoEnabled) {
+      try {
+        const workdir = session.workdir || CONFIG.defaultWorkdir;
+        const res = await enqueueConversation(conversationKey, async () =>
+          writeHandoffEntry({
+            session,
+            conversationKey,
+            workdir,
+            dryRun: false,
+            doCommit: CONFIG.handoffGitAutoCommit,
+            doPush: CONFIG.handoffGitAutoPush,
+          })
+        );
+        if (res && res.ok) {
+          const note = res.commitSummary ? ` (${res.commitSummary})` : "";
+          await channel.send(`Auto-handoff written to ${res.files.map((p) => `\`${p}\``).join(", ")}${note}`);
+        }
+      } catch (err) {
+        logRelayEvent("handoff.auto.error", {
+          conversationKey,
+          error: String(err && err.message ? err.message : err).slice(0, 240),
+        });
+      }
+    }
   }
+}
+
+async function writeHandoffEntry({ session, conversationKey, workdir, dryRun, doCommit, doPush }) {
+  const repo = await resolveGitRepoRoot(workdir);
+  const baseDir = repo.ok ? repo.root : workdir;
+
+  const ensured = [];
+  for (const rel of CONFIG.handoffFiles) {
+    const resolved = path.isAbsolute(rel) ? path.resolve(rel) : path.resolve(baseDir, rel);
+    ensured.push(resolved);
+    try {
+      await fsp.mkdir(path.dirname(resolved), { recursive: true });
+    } catch {}
+    try {
+      await fsp.stat(resolved);
+    } catch {
+      const header = rel.includes("WORKING_MEMORY")
+        ? "# Working Memory (append-only)\n"
+        : rel.includes("HANDOFF")
+          ? "# Handoff Log (append-only)\n"
+          : "# Handoff (append-only)\n";
+      if (!dryRun) await fsp.writeFile(resolved, header, "utf8");
+    }
+  }
+
+  let branch = "";
+  let status = "";
+  let diffStat = "";
+  if (repo.ok) {
+    const branchRes = await execFileCapture("git", ["-C", repo.root, "rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd: repo.root,
+      timeoutMs: 15000,
+    });
+    branch = String(branchRes.stdout || "").trim();
+    const stRes = await execFileCapture("git", ["-C", repo.root, "status", "--porcelain=v1"], { cwd: repo.root, timeoutMs: 20000 });
+    status = String(stRes.stdout || "").trim();
+    const diffRes = await execFileCapture("git", ["-C", repo.root, "diff", "--stat"], { cwd: repo.root, timeoutMs: 20000 });
+    diffStat = String(diffRes.stdout || "").trim();
+  }
+
+  ensureTasksShape(session);
+  ensureTaskLoopShape(session);
+  ensurePlansShape(session);
+  const counts = { pending: 0, running: 0, done: 0, failed: 0, blocked: 0, canceled: 0 };
+  for (const t of session.tasks || []) {
+    if (t && typeof t === "object" && counts[t.status] != null) counts[t.status] += 1;
+  }
+
+  const lastPlan = session.plans && session.plans.length ? session.plans[session.plans.length - 1] : null;
+  const planTail = lastPlan && lastPlan.text ? lastPlan.text.slice(-1200) : "";
+
+  const prompt = [
+    "Write a handoff entry for future agents. Output MUST be Markdown (no code fences).",
+    "",
+    "Format:",
+    "## <timestamp in ISO 8601>",
+    "### Objective",
+    "- ...",
+    "### Changes",
+    "- ...",
+    "### Evidence",
+    "- paths and commands",
+    "### Next steps",
+    "- ...",
+    "",
+    `timestamp: ${nowIso()}`,
+    `workdir: ${workdir}`,
+    repo.ok ? `repo_root: ${repo.root}` : "repo_root: (not a git repo)",
+    branch ? `branch: ${branch}` : null,
+    status ? `git status --porcelain=v1:\n${status}` : null,
+    diffStat ? `git diff --stat:\n${diffStat}` : null,
+    "",
+    `task_counts: pending=${counts.pending} running=${counts.running} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`,
+    planTail ? `last_plan_tail:\n${planTail}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const args = buildCodexArgsStateless(workdir, prompt, { sandboxMode: "read-only" });
+  const res = await runCodexWithArgs(args, { cwd: workdir, extraEnv: null, onProgress: null, conversationKey, label: "handoff" });
+
+  const entryText = String(res.text || "").trim();
+  const entry = entryText ? `\n\n${entryText}\n` : "\n\n## (empty handoff)\n";
+  for (const filePath of ensured) {
+    if (!dryRun) await fsp.appendFile(filePath, entry, "utf8");
+  }
+
+  let commitSummary = "";
+  if (doCommit && repo.ok && !dryRun) {
+    const addArgs = ["-C", repo.root, "add", ...ensured.map((p) => path.relative(repo.root, p))];
+    await execFileCapture("git", addArgs, { cwd: repo.root, timeoutMs: 30000 });
+    const diffCached = await execFileCapture("git", ["-C", repo.root, "diff", "--cached", "--quiet"], { cwd: repo.root, timeoutMs: 20000 });
+    if (diffCached.code === 0) {
+      commitSummary = "no changes to commit";
+    } else {
+      const msg = CONFIG.handoffGitCommitMessage || "chore: relay handoff";
+      const commitRes = await execFileCapture("git", ["-C", repo.root, "commit", "-m", msg], { cwd: repo.root, timeoutMs: 60000 });
+      if (commitRes.code === 0) {
+        const shaRes = await execFileCapture("git", ["-C", repo.root, "rev-parse", "HEAD"], { cwd: repo.root, timeoutMs: 15000 });
+        const sha = String(shaRes.stdout || "").trim().slice(0, 12);
+        commitSummary = `committed ${sha}`;
+        if (doPush) {
+          const branchNameRes = await execFileCapture("git", ["-C", repo.root, "rev-parse", "--abbrev-ref", "HEAD"], {
+            cwd: repo.root,
+            timeoutMs: 15000,
+          });
+          const br = String(branchNameRes.stdout || "").trim() || "main";
+          const pushRes = await execFileCapture("git", ["-C", repo.root, "push", "origin", br], { cwd: repo.root, timeoutMs: 120000 });
+          if (pushRes.code === 0) commitSummary += " + pushed";
+          else commitSummary += " (push failed)";
+        }
+      } else {
+        commitSummary = "git commit failed";
+      }
+    }
+  } else if (doCommit && !repo.ok) {
+    commitSummary = "commit skipped (not a git repo)";
+  }
+
+  return { ok: true, files: ensured, entryText, commitSummary };
 }
 
 async function handleCommand(message, session, command, conversationKey) {
@@ -2053,6 +2717,8 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/context reload` - force context re-bootstrap on next message",
         "`/task <subcmd>` - manage per-conversation task queue (add/list/run/stop/clear)",
         "`/worktree <subcmd>` - manage git worktrees (list/new/use/rm/prune)",
+        "`/plan <subcmd>` - manage plans (new/list/show/apply)",
+        "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
       ].join("\n")
     );
     return true;
@@ -2104,6 +2770,232 @@ async function handleCommand(message, session, command, conversationKey) {
       }
     }
     await sendLongReply(message, lines.join("\n"));
+    return true;
+  }
+
+  if (command.name === "plan") {
+    if (!CONFIG.plansEnabled) {
+      await message.reply("Plans are disabled on this relay (RELAY_PLANS_ENABLED=false).");
+      return true;
+    }
+    ensurePlansShape(session);
+
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = subRaw.toLowerCase();
+
+    if (!sub || sub === "list") {
+      if (!session.plans.length) {
+        await message.reply("No saved plans for this conversation. Use `/plan new <request>`.");
+        return true;
+      }
+      const lines = [];
+      lines.push(`plans: ${session.plans.length} (max_history=${CONFIG.plansMaxHistory})`);
+      const show = session.plans.slice(-10);
+      for (const p of show) {
+        const req = p && p.request ? taskTextPreview(p.request, 80) : "(no request)";
+        lines.push(`- ${p.id} ${p.createdAt} ${req}`);
+      }
+      if (session.plans.length > show.length) {
+        lines.push(`- ... (${session.plans.length - show.length} more)`);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    if (sub === "new") {
+      if (!rest) {
+        await message.reply("Usage: `/plan new <request...>`");
+        return true;
+      }
+      const workdir = session.workdir || CONFIG.defaultWorkdir;
+
+      let repoRoot = "";
+      let branch = "";
+      let status = "";
+      let diffStat = "";
+      const repo = await resolveGitRepoRoot(workdir);
+      if (repo.ok) {
+        repoRoot = repo.root;
+        const branchRes = await execFileCapture("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], {
+          cwd: repoRoot,
+          timeoutMs: 15000,
+        });
+        branch = String(branchRes.stdout || "").trim();
+        const stRes = await execFileCapture("git", ["-C", repoRoot, "status", "--porcelain=v1"], {
+          cwd: repoRoot,
+          timeoutMs: 20000,
+        });
+        status = String(stRes.stdout || "").trim();
+        const diffRes = await execFileCapture("git", ["-C", repoRoot, "diff", "--stat"], {
+          cwd: repoRoot,
+          timeoutMs: 20000,
+        });
+        diffStat = String(diffRes.stdout || "").trim();
+      }
+
+      const prompt = [
+        "You are generating an execution plan for an agent working via a Discord relay.",
+        "",
+        "Constraints:",
+        "- Planning only: do not assume you can run commands.",
+        "- Output MUST be a markdown checklist: each step is one line starting with '- [ ] '.",
+        "- Keep steps small, concrete, and ordered.",
+        "- If you need clarification, add a final 'Questions:' section with '- ' bullets.",
+        "",
+        `Workdir: ${workdir}`,
+        repoRoot ? `Repo root: ${repoRoot}` : "Repo root: (not a git repo)",
+        branch ? `Branch: ${branch}` : null,
+        status ? `git status --porcelain=v1:\n${status}` : null,
+        diffStat ? `git diff --stat:\n${diffStat}` : null,
+        "",
+        `User request: ${rest}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const args = buildCodexArgsStateless(workdir, prompt, { sandboxMode: "read-only" });
+      const res = await runCodexWithArgs(args, {
+        cwd: workdir,
+        extraEnv: null,
+        onProgress: null,
+        conversationKey,
+        label: "plan",
+      });
+
+      const plan = createPlan(session, rest, res.text || "");
+      session.plans.push(plan);
+      ensurePlansShape(session);
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      await sendLongReply(
+        message,
+        [
+          `Plan saved: \`${plan.id}\` (generated with codex sandbox=read-only)`,
+          `Apply: \`/plan apply ${plan.id}\``,
+          "",
+          plan.text || "(empty plan)",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    if (sub === "show") {
+      const id = (rest || "").split(/\s+/)[0] || "last";
+      const plan = findPlan(session, id);
+      if (!plan) {
+        await message.reply("No such plan. Use `/plan list`.");
+        return true;
+      }
+      await sendLongReply(message, [`Plan \`${plan.id}\` (${plan.createdAt})`, "", plan.text || "(empty)"].join("\n"));
+      return true;
+    }
+
+    if (sub === "apply") {
+      if (!CONFIG.tasksEnabled) {
+        await message.reply("Tasks are disabled on this relay (RELAY_TASKS_ENABLED=false).");
+        return true;
+      }
+      ensureTasksShape(session);
+      ensureTaskLoopShape(session);
+      const id = (rest || "").split(/\s+/)[0] || "last";
+      const plan = findPlan(session, id);
+      if (!plan) {
+        await message.reply("No such plan. Use `/plan list`.");
+        return true;
+      }
+
+      const steps = parsePlanSteps(plan.text || "");
+      if (steps.length === 0) {
+        await message.reply("Plan has no parseable steps. Use '- [ ] ' checklist format.");
+        return true;
+      }
+
+      const pending = session.tasks.filter((t) => t && t.status === "pending").length;
+      const maxPending = Math.max(0, CONFIG.tasksMaxPending);
+      const room = maxPending > 0 ? Math.max(0, maxPending - pending) : steps.length;
+      const toAdd = steps.slice(0, room);
+      if (toAdd.length === 0) {
+        await message.reply(`Task queue is full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
+        return true;
+      }
+
+      for (const step of toAdd) {
+        session.tasks.push(createTask(session, step));
+      }
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      const started = !taskRunnerByConversation.has(conversationKey);
+      if (started) {
+        session.taskLoop.running = true;
+        session.taskLoop.stopRequested = false;
+        session.taskLoop.currentTaskId = null;
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
+        void kickTaskRunner(conversationKey, message.channel, session, {
+          isDm: !message.guildId,
+          isThread: Boolean(message.channel && message.channel.isThread && message.channel.isThread()),
+        });
+      }
+
+      await message.reply(
+        started
+          ? `Applied \`${plan.id}\`: queued ${toAdd.length} task(s) and started runner.`
+          : `Applied \`${plan.id}\`: queued ${toAdd.length} task(s) (runner already running).`
+      );
+      return true;
+    }
+
+    await message.reply("Usage: `/plan new|list|show|apply`");
+    return true;
+  }
+
+  if (command.name === "handoff") {
+    if (!CONFIG.handoffEnabled) {
+      await message.reply("Handoff is disabled on this relay (RELAY_HANDOFF_ENABLED=false).");
+      return true;
+    }
+
+    const tokens = (command.arg || "").split(/\s+/).filter(Boolean);
+    const dryRun = tokens.includes("--dry-run");
+    const commitFlag = tokens.includes("--commit");
+    const noCommitFlag = tokens.includes("--no-commit");
+    const pushFlag = tokens.includes("--push");
+    const noPushFlag = tokens.includes("--no-push");
+    if (tokens.includes("-h") || tokens.includes("--help")) {
+      await sendLongReply(
+        message,
+        [
+          "Usage: `/handoff [--dry-run] [--commit|--no-commit] [--push|--no-push]`",
+          "",
+          "Writes a repo-local handoff entry to files from RELAY_HANDOFF_FILES (default: HANDOFF_LOG.md;docs/WORKING_MEMORY.md).",
+          "Generation uses `codex exec --sandbox read-only` and the relay appends the result to files.",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    const doCommit = noCommitFlag ? false : commitFlag ? true : CONFIG.handoffGitAutoCommit;
+    const doPush = noPushFlag ? false : pushFlag ? true : CONFIG.handoffGitAutoPush;
+
+    if (isTaskRunnerActive(conversationKey, session)) {
+      await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+      return true;
+    }
+
+    const workdir = session.workdir || CONFIG.defaultWorkdir;
+    const res = await writeHandoffEntry({ session, conversationKey, workdir, dryRun, doCommit, doPush });
+    if (!res || !res.ok) {
+      await message.reply("Handoff failed.");
+      return true;
+    }
+    const commitNote = res.commitSummary ? ` (${res.commitSummary})` : "";
+
+    await message.reply(
+      `${dryRun ? "[dry-run] " : ""}Handoff written to ${res.files.map((p) => `\`${p}\``).join(", ")}${commitNote}`
+    );
     return true;
   }
 

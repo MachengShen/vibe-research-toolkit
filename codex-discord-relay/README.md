@@ -142,6 +142,47 @@ Env knobs:
 
 - `RELAY_WORKTREE_ROOT_DIR=/abs/path` (default `$RELAY_STATE_DIR/worktrees`)
 
+## Plans
+
+Commands:
+
+- `/plan new <request...>`: generate and save a plan (Codex run uses `--sandbox read-only`).
+- `/plan list`: list saved plans for this conversation.
+- `/plan show <id|last>`: show a saved plan.
+- `/plan apply <id|last>`: convert plan steps to `/task` items and start the task runner.
+
+Notes:
+
+- Plan generation uses `codex exec --sandbox read-only` (stateless) so it cannot write files.
+- For best results, keep plans in checklist format (`- [ ] step` per line).
+
+Env knobs:
+
+- `RELAY_PLANS_ENABLED=true|false`
+- `RELAY_PLANS_MAX_HISTORY=<int>` (default `20`)
+
+## Handoff And Working Memory
+
+Commands:
+
+- `/handoff`: generate a handoff entry (Codex run uses `--sandbox read-only`) and append it to files.
+- `/handoff --commit`: also `git commit` the updated handoff files (repo only).
+- `/handoff --push`: push after commit (repo only).
+
+Notes:
+
+- The relay appends to the files itself; Codex is used only to *generate* the text in read-only mode.
+- If `RELAY_HANDOFF_AUTO_ENABLED=true`, a handoff is written automatically after `/task run` completes.
+
+Env knobs:
+
+- `RELAY_HANDOFF_ENABLED=true|false`
+- `RELAY_HANDOFF_FILES="HANDOFF_LOG.md;docs/WORKING_MEMORY.md"` (semicolon-separated)
+- `RELAY_HANDOFF_AUTO_ENABLED=true|false` (default `false`)
+- `RELAY_HANDOFF_GIT_AUTO_COMMIT=true|false` (default `false`)
+- `RELAY_HANDOFF_GIT_AUTO_PUSH=true|false` (default `false`)
+- `RELAY_HANDOFF_GIT_COMMIT_MESSAGE="..."` (default `chore: relay handoff`)
+
 ## Agent Context Bootstrap
 
 By default, the relay prepends a small runtime context block before forwarding a user prompt to Codex/Claude. This makes agents aware of:

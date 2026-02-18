@@ -570,3 +570,15 @@ Training status: inactive (no active training run, epoch/metrics N/A).
   - /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
   - live: /root/codex-discord-relay/relay.js ; /root/.codex-discord-relay.env ; /root/.codex-discord-relay/relay.log
 - Training status: no active training run in this task; epoch/metrics N/A.
+
+[2026-02-18T13:21:40+08:00] owner=codex objective=Step 3/4 implementation: commit+push+deploy (major action)
+- Correction note (append-only): the earlier Step 3/4 task-start entry in this file was stamped 2026-02-17T20:34:30+08:00, but the actual implementation/verification/deploy work was performed on 2026-02-18 (+08:00).
+- Toolkit commit pushed to origin/main:
+  - 8f1ffc5 relay: add /task queue and /worktree manager
+- Live deployment performed:
+  - /root/codex-discord-relay/relay.js updated from toolkit and relays restarted
+  - current pids: default=15020 claude=15051
+- Verification:
+  - node --check codex-discord-relay/relay.js (toolkit and live)
+  - bash -n scripts/install_codex_discord_relay.sh
+  - running relay env confirms: CODEX_SANDBOX=danger-full-access, CODEX_APPROVAL=never

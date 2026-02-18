@@ -905,6 +905,12 @@ function getSession(key) {
   return created;
 }
 
+function isTaskRunnerActive(conversationKey, session) {
+  if (!conversationKey) return Boolean(session && session.taskLoop && session.taskLoop.running);
+  if (taskRunnerByConversation.has(conversationKey)) return true;
+  return Boolean(session && session.taskLoop && session.taskLoop.running);
+}
+
 function extractPrompt(message, botUserId) {
   let text = message.content || "";
   if (message.guildId) {
@@ -2359,8 +2365,16 @@ async function handleCommand(message, session, command, conversationKey) {
         await message.reply(resolved.error);
         return true;
       }
-      if (!force && path.resolve(resolved.path) === path.resolve(session.workdir || "")) {
-        await message.reply("Refusing to remove the active workdir. Use `--force` if you really want this.");
+      const sessionWorkdir = session.workdir ? path.resolve(session.workdir) : "";
+      const worktreeRoot = path.resolve(resolved.path);
+      const containsActiveWorkdir = sessionWorkdir ? isSubPath(worktreeRoot, sessionWorkdir) : false;
+
+      if (!force && containsActiveWorkdir) {
+        await message.reply(
+          sessionWorkdir && sessionWorkdir !== worktreeRoot
+            ? `Refusing to remove a worktree that contains the active workdir: \`${sessionWorkdir}\`. Use \`--force\` if you really want this.`
+            : "Refusing to remove the active workdir. Use `--force` if you really want this."
+        );
         return true;
       }
       const removed = await gitWorktreeRemove(repo.root, resolved.path, force);
@@ -2368,7 +2382,7 @@ async function handleCommand(message, session, command, conversationKey) {
         await message.reply(removed.error);
         return true;
       }
-      if (path.resolve(resolved.path) === path.resolve(session.workdir || "")) {
+      if (containsActiveWorkdir) {
         session.workdir = repo.root;
         session.threadId = null;
         session.contextVersion = 0;
@@ -2539,6 +2553,11 @@ async function main() {
 
       const command = parseCommand(prompt);
       if (command) {
+        // Step 3 robustness: refuse workdir/session control while task runner is active.
+        if (isTaskRunnerActive(key, session) && (command.name === "workdir" || command.name === "reset" || command.name === "attach")) {
+          await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+          return;
+        }
         // `/task stop` must be responsive; handle it outside the per-conversation queue so
         // it can kill an in-flight child process immediately.
         if (command.name === "task") {

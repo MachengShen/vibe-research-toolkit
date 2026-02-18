@@ -591,3 +591,21 @@ Training status: inactive (no active training run, epoch/metrics N/A).
 - Added runtime context bullet so agents know attachments are injected and where they are saved.
 - Commit pushed: f59766e
 - Live deployed: /root/codex-discord-relay/relay.js updated from toolkit; relays restarted.
+
+[2026-02-18T15:38:23+08:00] owner: codex-agent
+objective: Fix Step 3/4 issues + implement Step 9/10 upgrades in codex-discord-relay
+action: major update
+what_changed:
+- /worktree rm: compute safe fallback workdir when removing active worktree; run git remove/prune from a different worktree when needed
+- /task: add RELAY_TASKS_SUMMARY_AFTER_RUN; improve stop bookkeeping (canceled tasks show lastError=stop requested); optional git auto-commit after successful tasks
+- /plan: plans are generated in read-only sandbox and saved to disk under $RELAY_STATE_DIR/plans/<conversationKey>/<planId>.md; /plan apply executes plan directly (optional --confirm gate in guild channels)
+- /handoff: --dry-run now prints the generated entry; auto-handoff can be enabled separately for task runs vs plan applies
+- Optional git auto-commit after successful /plan apply (never auto-push)
+commit: b5821b6
+verified:
+- node --check codex-discord-relay/relay.js
+- bash -n bootstrap.sh
+- bash -n scripts/*.sh
+next_steps:
+- Deploy updated relay to /root/codex-discord-relay and restart instances
+- Manually test in Discord: /worktree rm on active workdir; /plan new/show/apply; /task stop responsiveness

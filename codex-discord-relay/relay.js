@@ -3215,14 +3215,28 @@ async function handleCommand(message, session, command, conversationKey) {
         .filter(Boolean)
         .join("\n");
 
+      // Send a live progress message that updates with elapsed time while the plan generates.
+      const planProgressMsg = await message.reply("Generating plan... (elapsed 0s)");
+      const planStartedAt = Date.now();
+      const planProgressTick = setInterval(async () => {
+        const elapsed = formatElapsed(Date.now() - planStartedAt);
+        try { await planProgressMsg.edit(`Generating plan... (elapsed ${elapsed})`); } catch (_) { /* ignore */ }
+      }, 5000);
+
       const args = buildCodexArgsStateless(workdir, prompt, { sandboxMode: "read-only" });
-      const res = await runCodexWithArgs(args, {
-        cwd: workdir,
-        extraEnv: null,
-        onProgress: null,
-        conversationKey,
-        label: "plan",
-      });
+      let res;
+      try {
+        res = await runCodexWithArgs(args, {
+          cwd: workdir,
+          extraEnv: null,
+          onProgress: null,
+          conversationKey,
+          label: "plan",
+        });
+      } finally {
+        clearInterval(planProgressTick);
+        try { await planProgressMsg.delete(); } catch (_) { /* ignore if already gone */ }
+      }
 
       const planText = String(res.text || "").trim();
       const plan = await createAndSavePlan(session, conversationKey, workdir, requestText, planText);
@@ -3786,6 +3800,22 @@ async function main() {
             await message.reply("Stop requested.");
             return;
           }
+        }
+        // `/status` bypasses the queue so it always responds immediately, even if a long
+        // agent run or /plan generation is in progress.
+        if (command.name === "status") {
+          const isRunning = queueByConversation.has(key);
+          const uploadDir = getConversationUploadDir(key);
+          const sessionContextVersion = getSessionContextVersion(session);
+          const lines = [
+            `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
+            `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
+            `upload_dir: ${uploadDir}`,
+            `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
+            `queue: ${isRunning ? "busy (request in progress)" : "idle"}`,
+          ];
+          await message.reply(lines.join("\n"));
+          return;
         }
         await enqueueConversation(key, async () => handleCommand(message, session, command, key));
         return;

@@ -253,15 +253,29 @@ const CONFIG = {
   tasksMaxPending: Math.max(1, intEnv("RELAY_TASKS_MAX_PENDING", 50)),
   tasksStopOnError: boolEnv("RELAY_TASKS_STOP_ON_ERROR", false),
   tasksPostFullOutput: boolEnv("RELAY_TASKS_POST_FULL_OUTPUT", true),
+  tasksSummaryAfterRun: boolEnv("RELAY_TASKS_SUMMARY_AFTER_RUN", true),
 
   worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
   worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
 
   plansEnabled: boolEnv("RELAY_PLANS_ENABLED", true),
   plansMaxHistory: Math.max(1, intEnv("RELAY_PLANS_MAX_HISTORY", 20)),
+  planApplyRequireConfirmInGuilds: boolEnv("RELAY_PLAN_APPLY_REQUIRE_CONFIRM_IN_GUILDS", true),
 
   handoffEnabled: boolEnv("RELAY_HANDOFF_ENABLED", true),
   handoffAutoEnabled: boolEnv("RELAY_HANDOFF_AUTO_ENABLED", false),
+  handoffAutoAfterTaskRun: (() => {
+    if (process.env.RELAY_AUTO_HANDOFF_AFTER_TASK_RUN != null) {
+      return boolEnv("RELAY_AUTO_HANDOFF_AFTER_TASK_RUN", false);
+    }
+    return boolEnv("RELAY_HANDOFF_AUTO_ENABLED", false);
+  })(),
+  handoffAutoAfterPlanApply: (() => {
+    if (process.env.RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY != null) {
+      return boolEnv("RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY", false);
+    }
+    return boolEnv("RELAY_HANDOFF_AUTO_ENABLED", false);
+  })(),
   handoffFiles: (() => {
     const raw = (process.env.RELAY_HANDOFF_FILES || "").trim();
     const files = raw ? parseSemiList(raw) : ["HANDOFF_LOG.md", "docs/WORKING_MEMORY.md"];
@@ -270,6 +284,10 @@ const CONFIG = {
   handoffGitAutoCommit: boolEnv("RELAY_HANDOFF_GIT_AUTO_COMMIT", false),
   handoffGitAutoPush: boolEnv("RELAY_HANDOFF_GIT_AUTO_PUSH", false),
   handoffGitCommitMessage: (process.env.RELAY_HANDOFF_GIT_COMMIT_MESSAGE || "chore: relay handoff").trim(),
+
+  gitAutoCommitEnabled: boolEnv("RELAY_GIT_AUTO_COMMIT", false),
+  gitAutoCommitScope: (process.env.RELAY_GIT_AUTO_COMMIT_SCOPE || "both").trim().toLowerCase(),
+  gitCommitPrefix: (process.env.RELAY_GIT_COMMIT_PREFIX || "ai:").trim() || "ai:",
 
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
@@ -845,11 +863,30 @@ function normalizePlanObject(plan, fallbackId) {
     plan.createdAt = nowIso();
     changed = true;
   }
+  if (plan.title != null && typeof plan.title !== "string") {
+    plan.title = String(plan.title || "");
+    changed = true;
+  }
+  if (!plan.title || !String(plan.title).trim()) {
+    const derived = plan.request ? taskTextPreview(plan.request, 72) : "";
+    if (derived) {
+      plan.title = derived;
+      changed = true;
+    }
+  }
+  if (plan.workdir != null && typeof plan.workdir !== "string") {
+    plan.workdir = String(plan.workdir || "");
+    changed = true;
+  }
+  if (plan.path != null && typeof plan.path !== "string") {
+    plan.path = String(plan.path || "");
+    changed = true;
+  }
   if (plan.request != null && typeof plan.request !== "string") {
     plan.request = String(plan.request || "");
     changed = true;
   }
-  if (typeof plan.text !== "string") {
+  if (plan.text != null && typeof plan.text !== "string") {
     plan.text = String(plan.text || "");
     changed = true;
   }
@@ -1913,27 +1950,78 @@ function taskTextPreview(text, maxLen = 60) {
   return `${raw.slice(0, maxLen - 1)}…`;
 }
 
-function nextPlanId(session) {
-  const plans = session && Array.isArray(session.plans) ? session.plans : [];
-  let max = 0;
-  for (const p of plans) {
-    if (!p || typeof p !== "object") continue;
-    const m = String(p.id || "").match(/^p-(\d{4})$/);
-    if (!m) continue;
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return `p-${String(max + 1).padStart(4, "0")}`;
+function safeConversationDirName(conversationKey) {
+  const raw = String(conversationKey || "").trim() || "unknown";
+  const cleaned = raw.replace(/[\\/]/g, "_").replace(/[^a-zA-Z0-9._:-]/g, "_");
+  if (cleaned.length <= 80) return cleaned;
+  const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
+  return `${cleaned.slice(0, 60)}-${hash}`;
 }
 
-function createPlan(session, request, text) {
-  const id = nextPlanId(session);
-  return {
+function newPlanId() {
+  const d = new Date();
+  const yyyy = String(d.getFullYear());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const HH = String(d.getHours()).padStart(2, "0");
+  const MM = String(d.getMinutes()).padStart(2, "0");
+  const SS = String(d.getSeconds()).padStart(2, "0");
+  const rand = crypto.randomBytes(2).toString("hex");
+  return `p-${yyyy}${mm}${dd}-${HH}${MM}${SS}-${rand}`;
+}
+
+function planTitleFromRequest(request) {
+  const t = taskTextPreview(String(request || "").trim(), 72);
+  return t || "plan";
+}
+
+function planStorageDir(conversationKey) {
+  return path.join(CONFIG.stateDir, "plans", safeConversationDirName(conversationKey));
+}
+
+function planStoragePath(conversationKey, planId) {
+  return path.join(planStorageDir(conversationKey), `${planId}.md`);
+}
+
+async function writePlanFile(conversationKey, planId, planText) {
+  const dir = planStorageDir(conversationKey);
+  await fsp.mkdir(dir, { recursive: true });
+  const filePath = planStoragePath(conversationKey, planId);
+  await fsp.writeFile(filePath, String(planText || ""), "utf8");
+  return filePath;
+}
+
+async function loadPlanText(plan) {
+  if (!plan || typeof plan !== "object") return "";
+  if (typeof plan.path === "string" && plan.path.trim()) {
+    try {
+      return String(await fsp.readFile(plan.path, "utf8"));
+    } catch {
+      // Fall back to embedded text if present.
+    }
+  }
+  if (typeof plan.text === "string") return plan.text;
+  return "";
+}
+
+async function createAndSavePlan(session, conversationKey, workdir, request, planText) {
+  const id = newPlanId();
+  const createdAt = nowIso();
+  const absWorkdir = path.resolve(workdir || CONFIG.defaultWorkdir);
+  const title = planTitleFromRequest(request);
+  const filePath = await writePlanFile(conversationKey, id, planText);
+  const plan = {
     id,
-    createdAt: nowIso(),
+    createdAt,
+    title,
+    workdir: absWorkdir,
+    path: filePath,
     request: String(request || "").trim() || null,
-    text: String(text || ""),
   };
+  ensurePlansShape(session);
+  session.plans.push(plan);
+  ensurePlansShape(session);
+  return plan;
 }
 
 function findPlan(session, idOrLast) {
@@ -2017,7 +2105,8 @@ function parseTaskMarkers(text) {
 function requestStopConversation(conversationKey, session) {
   const runner = taskRunnerByConversation.get(conversationKey);
   if (runner) runner.stopRequested = true;
-  if (session && typeof session === "object") {
+  const shouldSetTaskStopFlag = Boolean(runner) || Boolean(session && session.taskLoop && session.taskLoop.running);
+  if (shouldSetTaskStopFlag && session && typeof session === "object") {
     ensureTaskLoopShape(session);
     session.taskLoop.stopRequested = true;
     session.updatedAt = nowIso();
@@ -2469,6 +2558,73 @@ async function gitWorktreeRemove(repoRoot, worktreePath, force) {
   return { ok: true };
 }
 
+function gitAutoCommitScopeAllows(scope) {
+  const want = String(scope || "").trim().toLowerCase();
+  const cfg = String(CONFIG.gitAutoCommitScope || "both").trim().toLowerCase();
+  if (!want) return false;
+  if (cfg === "both" || cfg === "all" || !cfg) return true;
+  if (cfg === "task" || cfg === "tasks") return want === "task";
+  if (cfg === "plan" || cfg === "plans") return want === "plan";
+  return true;
+}
+
+function buildAutoCommitSubject({ id, title }) {
+  const prefix = (CONFIG.gitCommitPrefix || "ai:").trim() || "ai:";
+  const baseTitle = taskTextPreview(title || "", 64);
+  const pieces = [prefix, id, baseTitle].filter(Boolean);
+  const raw = pieces.join(" ").replace(/\s+/g, " ").trim();
+  if (!raw) return `${prefix} ${id}`.trim();
+  if (raw.length <= 72) return raw;
+  return raw.slice(0, 71).trim();
+}
+
+async function maybeAutoCommitGit({ workdir, scope, id, title, conversationKey }) {
+  if (!CONFIG.gitAutoCommitEnabled) return { ok: false, skipped: "disabled" };
+  if (!gitAutoCommitScopeAllows(scope)) return { ok: false, skipped: "scope" };
+
+  const repo = await resolveGitRepoRoot(workdir);
+  if (!repo.ok) return { ok: false, skipped: "not a git repo" };
+
+  const stRes = await execFileCapture("git", ["-C", repo.root, "status", "--porcelain=v1"], { cwd: repo.root, timeoutMs: 20000 });
+  if (stRes.code !== 0) {
+    const detail = (stRes.stderr || stRes.stdout || "").trim();
+    return { ok: false, error: `git status failed: ${detail.slice(0, 240)}` };
+  }
+  const status = String(stRes.stdout || "").trim();
+  if (!status) return { ok: false, skipped: "clean" };
+
+  const addRes = await execFileCapture("git", ["-C", repo.root, "add", "-A"], { cwd: repo.root, timeoutMs: 30000 });
+  if (addRes.code !== 0) {
+    const detail = (addRes.stderr || addRes.stdout || "").trim();
+    return { ok: false, error: `git add failed: ${detail.slice(0, 240)}` };
+  }
+
+  const diffCached = await execFileCapture("git", ["-C", repo.root, "diff", "--cached", "--quiet"], { cwd: repo.root, timeoutMs: 20000 });
+  if (diffCached.code === 0) return { ok: false, skipped: "no staged changes" };
+
+  const filesRes = await execFileCapture("git", ["-C", repo.root, "diff", "--cached", "--name-only"], { cwd: repo.root, timeoutMs: 20000 });
+  const files = String(filesRes.stdout || "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 80);
+  const body = files.length ? `Changed files:\n${files.map((f) => `- ${f}`).join("\n")}` : "";
+
+  const subject = buildAutoCommitSubject({ id, title });
+  const commitArgs = ["-C", repo.root, "commit", "-m", subject];
+  if (body) commitArgs.push("-m", body);
+  const commitRes = await execFileCapture("git", commitArgs, { cwd: repo.root, timeoutMs: 90000 });
+  if (commitRes.code !== 0) {
+    const detail = (commitRes.stderr || commitRes.stdout || "").trim();
+    return { ok: false, error: `git commit failed:\n${detail.slice(0, 700)}` };
+  }
+
+  const shaRes = await execFileCapture("git", ["-C", repo.root, "rev-parse", "HEAD"], { cwd: repo.root, timeoutMs: 15000 });
+  const sha = String(shaRes.stdout || "").trim().slice(0, 12);
+  logRelayEvent("git.auto_commit", { conversationKey, scope, id, sha, repoRoot: repo.root });
+  return { ok: true, sha, repoRoot: repo.root, subject };
+}
+
 async function kickTaskRunner(conversationKey, channel, session, meta) {
   const runner = taskRunnerByConversation.get(conversationKey);
   if (!runner || !channel) return;
@@ -2538,6 +2694,27 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
         task.lastResultPreview = taskTextPreview(parsed.cleaned, 200) || null;
         task.lastError = null;
         logRelayEvent("task.finished", { conversationKey, taskId: task.id, status: task.status });
+        if (task.status === "done") {
+          try {
+            const commit = await maybeAutoCommitGit({
+              workdir: session.workdir || CONFIG.defaultWorkdir,
+              scope: "task",
+              id: task.id,
+              title: task.text || "",
+              conversationKey,
+            });
+            if (commit && commit.ok) {
+              await channel.send(`Auto-commit: ${commit.sha} (${commit.subject})`);
+            }
+          } catch (err) {
+            logRelayEvent("git.auto_commit.error", {
+              conversationKey,
+              scope: "task",
+              id: task.id,
+              error: String(err && err.message ? err.message : err).slice(0, 240),
+            });
+          }
+        }
         if (task.status === "blocked") break;
       } else {
         const stopNow =
@@ -2545,7 +2722,7 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
           (session.taskLoop && session.taskLoop.stopRequested);
         task.status = stopNow ? "canceled" : "failed";
         task.finishedAt = finishedAt;
-        task.lastError = res.error || "task failed";
+        task.lastError = stopNow ? "stop requested" : res.error || "task failed";
         task.lastResultPreview = null;
         logRelayEvent("task.finished", { conversationKey, taskId: task.id, status: task.status });
         if (CONFIG.tasksStopOnError) break;
@@ -2572,12 +2749,14 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
     taskRunnerByConversation.delete(conversationKey);
     const counts = summarizeCounts();
     try {
-      await channel.send(
-        `Task runner stopped. pending=${counts.pending} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`
-      );
+      if (CONFIG.tasksSummaryAfterRun) {
+        await channel.send(
+          `Task runner stopped. pending=${counts.pending} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`
+        );
+      }
     } catch {}
 
-    if (CONFIG.handoffAutoEnabled) {
+    if (CONFIG.handoffAutoAfterTaskRun) {
       try {
         const workdir = session.workdir || CONFIG.defaultWorkdir;
         const res = await enqueueConversation(conversationKey, async () =>
@@ -2651,7 +2830,13 @@ async function writeHandoffEntry({ session, conversationKey, workdir, dryRun, do
   }
 
   const lastPlan = session.plans && session.plans.length ? session.plans[session.plans.length - 1] : null;
-  const planTail = lastPlan && lastPlan.text ? lastPlan.text.slice(-1200) : "";
+  let planTail = "";
+  if (lastPlan) {
+    try {
+      const lastPlanText = await loadPlanText(lastPlan);
+      planTail = lastPlanText ? String(lastPlanText).slice(-1200) : "";
+    } catch {}
+  }
 
   const prompt = [
     "Write a handoff entry for future agents. Output MUST be Markdown (no code fences).",
@@ -2722,6 +2907,100 @@ async function writeHandoffEntry({ session, conversationKey, workdir, dryRun, do
   }
 
   return { ok: true, files: ensured, entryText, commitSummary };
+}
+
+async function startPlanApplyFlow({ conversationKey, message, session, plan, planText }) {
+  const channel = message && message.channel ? message.channel : null;
+  if (!channel) return;
+
+  const isDm = !message.guildId;
+  const isThread = Boolean(channel && channel.isThread && channel.isThread());
+  const workdir = session.workdir || CONFIG.defaultWorkdir;
+  const title = (plan && (plan.title || plan.request)) ? String(plan.title || plan.request) : "";
+
+  const prompt = [
+    `[PLAN ${plan && plan.id ? plan.id : "unknown"}]`,
+    planText,
+    "",
+    "Execute this plan now.",
+    "",
+    "Requirements:",
+    "- Make minimal diffs.",
+    "- Run the plan's verification steps (commands) and report results.",
+    "- Update docs/WORKING_MEMORY.md and HANDOFF_LOG.md as append-only artifacts (create them if missing).",
+    "",
+    "When finished:",
+    "- summarize what changed (file list) and what remains",
+    "- if blocked, clearly state what you need from the user",
+  ].join("\n");
+
+  let res = null;
+  try {
+    res = await runAgentAndPostToDiscord({
+      baseMessage: message,
+      channel,
+      session,
+      conversationKey,
+      prompt,
+      isDm,
+      isThread,
+      reasonLabel: `plan ${plan && plan.id ? plan.id : "unknown"} apply`,
+      postFullOutput: true,
+    });
+  } catch (err) {
+    logRelayEvent("plan.apply.error", {
+      conversationKey,
+      planId: plan && plan.id ? plan.id : null,
+      error: String(err && err.message ? err.message : err).slice(0, 240),
+    });
+    return;
+  }
+
+  if (res && res.ok) {
+    try {
+      const commit = await maybeAutoCommitGit({
+        workdir,
+        scope: "plan",
+        id: plan && plan.id ? plan.id : "plan",
+        title,
+        conversationKey,
+      });
+      if (commit && commit.ok) {
+        await channel.send(`Auto-commit: ${commit.sha} (${commit.subject})`);
+      }
+    } catch (err) {
+      logRelayEvent("git.auto_commit.error", {
+        conversationKey,
+        scope: "plan",
+        id: plan && plan.id ? plan.id : null,
+        error: String(err && err.message ? err.message : err).slice(0, 240),
+      });
+    }
+
+    if (CONFIG.handoffAutoAfterPlanApply) {
+      try {
+        const handoffRes = await enqueueConversation(conversationKey, async () =>
+          writeHandoffEntry({
+            session,
+            conversationKey,
+            workdir,
+            dryRun: false,
+            doCommit: CONFIG.handoffGitAutoCommit,
+            doPush: CONFIG.handoffGitAutoPush,
+          })
+        );
+        if (handoffRes && handoffRes.ok) {
+          const note = handoffRes.commitSummary ? ` (${handoffRes.commitSummary})` : "";
+          await channel.send(`Auto-handoff written to ${handoffRes.files.map((p) => `\`${p}\``).join(", ")}${note}`);
+        }
+      } catch (err) {
+        logRelayEvent("handoff.auto.error", {
+          conversationKey,
+          error: String(err && err.message ? err.message : err).slice(0, 240),
+        });
+      }
+    }
+  }
 }
 
 async function handleCommand(message, session, command, conversationKey) {
@@ -2806,29 +3085,82 @@ async function handleCommand(message, session, command, conversationKey) {
 
     if (!sub || sub === "list") {
       if (!session.plans.length) {
-        await message.reply("No saved plans for this conversation. Use `/plan new <request>`.");
+        await message.reply("No saved plans for this conversation. Use `/plan <request>`.");
         return true;
       }
+      const workdir = path.resolve(session.workdir || CONFIG.defaultWorkdir);
+      const matching = session.plans.filter(
+        (p) => p && typeof p === "object" && typeof p.workdir === "string" && path.resolve(p.workdir) === workdir
+      );
+      const pool = matching.length ? matching : session.plans;
       const lines = [];
-      lines.push(`plans: ${session.plans.length} (max_history=${CONFIG.plansMaxHistory})`);
-      const show = session.plans.slice(-10);
+      lines.push(`plans: total=${session.plans.length} showing=${Math.min(10, pool.length)} (max_history=${CONFIG.plansMaxHistory})`);
+      lines.push(`workdir: ${workdir}${matching.length ? " (filtered)" : ""}`);
+      const show = pool.slice(-10);
       for (const p of show) {
-        const req = p && p.request ? taskTextPreview(p.request, 80) : "(no request)";
-        lines.push(`- ${p.id} ${p.createdAt} ${req}`);
+        const title = p && p.title ? taskTextPreview(p.title, 72) : p && p.request ? taskTextPreview(p.request, 72) : "(no title)";
+        const wd = p && p.workdir ? path.basename(String(p.workdir)) : "";
+        lines.push(`- ${p.id} ${p.createdAt} ${title}${wd ? ` (wd:${wd})` : ""}`);
       }
-      if (session.plans.length > show.length) {
-        lines.push(`- ... (${session.plans.length - show.length} more)`);
+      if (pool.length > show.length) {
+        lines.push(`- ... (${pool.length - show.length} more)`);
       }
       await sendLongReply(message, lines.join("\n"));
       return true;
     }
 
-    if (sub === "new") {
-      if (!rest) {
-        await message.reply("Usage: `/plan new <request...>`");
+    if (sub === "show") {
+      const id = (rest || "").split(/\s+/)[0] || "last";
+      const plan = findPlan(session, id);
+      if (!plan) {
+        await message.reply("No such plan. Use `/plan list`.");
         return true;
       }
-      const workdir = session.workdir || CONFIG.defaultWorkdir;
+      const text = (await loadPlanText(plan)).trim();
+      await sendLongReply(message, [`Plan \`${plan.id}\` (${plan.createdAt})`, plan.path ? `path: \`${plan.path}\`` : null, "", text || "(empty)"].filter(Boolean).join("\n"));
+      return true;
+    }
+
+    if (sub === "apply") {
+      const tokens = (rest || "").split(/\s+/).filter(Boolean);
+      const id = tokens[0] || "last";
+      const confirm = tokens.includes("--confirm");
+      const plan = findPlan(session, id);
+      if (!plan) {
+        await message.reply("No such plan. Use `/plan list`.");
+        return true;
+      }
+      if (isTaskRunnerActive(conversationKey, session)) {
+        await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+        return true;
+      }
+      if (message.guildId && CONFIG.planApplyRequireConfirmInGuilds && !confirm) {
+        await message.reply(`Refusing to apply plan in a guild channel without \`--confirm\`. Re-run: \`/plan apply ${plan.id} --confirm\``);
+        return true;
+      }
+      const text = (await loadPlanText(plan)).trim();
+      if (!text) {
+        await message.reply("Plan text is empty or missing.");
+        return true;
+      }
+
+      void startPlanApplyFlow({
+        conversationKey,
+        message,
+        session,
+        plan,
+        planText: text,
+      });
+      return true;
+    }
+
+    // Treat anything else as "new plan" for ergonomics: `/plan <request...>`
+    const requestText = sub === "new" ? rest : command.arg;
+    if (!requestText) {
+      await message.reply("Usage: `/plan <request...>` or `/plan new <request...>`");
+      return true;
+    }
+    const workdir = session.workdir || CONFIG.defaultWorkdir;
 
       let repoRoot = "";
       let branch = "";
@@ -2855,13 +3187,22 @@ async function handleCommand(message, session, command, conversationKey) {
       }
 
       const prompt = [
-        "You are generating an execution plan for an agent working via a Discord relay.",
+        "You are in PLAN MODE.",
+        "Do not edit files. Do not run commands that modify the repo.",
         "",
-        "Constraints:",
-        "- Planning only: do not assume you can run commands.",
-        "- Output MUST be a markdown checklist: each step is one line starting with '- [ ] '.",
-        "- Keep steps small, concrete, and ordered.",
-        "- If you need clarification, add a final 'Questions:' section with '- ' bullets.",
+        "Return a Markdown plan with these sections (use these exact headings):",
+        "# Goal",
+        "# Assumptions",
+        "# Proposed changes (file-by-file)",
+        "# Risks & mitigations",
+        "# Verification steps (commands)",
+        "# Rollback plan",
+        "# Task breakdown (5–20 atomic tasks)",
+        "",
+        "Notes:",
+        "- Keep tasks small, concrete, and ordered.",
+        "- If you need clarification, add a final 'Questions:' section with '-' bullets.",
+        "- In 'Task breakdown', include items that can be executed sequentially by an agent.",
         "",
         `Workdir: ${workdir}`,
         repoRoot ? `Repo root: ${repoRoot}` : "Repo root: (not a git repo)",
@@ -2869,7 +3210,7 @@ async function handleCommand(message, session, command, conversationKey) {
         status ? `git status --porcelain=v1:\n${status}` : null,
         diffStat ? `git diff --stat:\n${diffStat}` : null,
         "",
-        `User request: ${rest}`,
+        `User request: ${requestText}`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -2883,8 +3224,8 @@ async function handleCommand(message, session, command, conversationKey) {
         label: "plan",
       });
 
-      const plan = createPlan(session, rest, res.text || "");
-      session.plans.push(plan);
+      const planText = String(res.text || "").trim();
+      const plan = await createAndSavePlan(session, conversationKey, workdir, requestText, planText);
       ensurePlansShape(session);
       session.updatedAt = nowIso();
       await queueSaveState();
@@ -2893,84 +3234,13 @@ async function handleCommand(message, session, command, conversationKey) {
         message,
         [
           `Plan saved: \`${plan.id}\` (generated with codex sandbox=read-only)`,
-          `Apply: \`/plan apply ${plan.id}\``,
+          plan.path ? `Saved at: \`${plan.path}\`` : null,
+          `Apply: \`/plan apply ${plan.id}${message.guildId && CONFIG.planApplyRequireConfirmInGuilds ? " --confirm" : ""}\``,
           "",
-          plan.text || "(empty plan)",
+          planText || "(empty plan)",
         ].join("\n")
       );
       return true;
-    }
-
-    if (sub === "show") {
-      const id = (rest || "").split(/\s+/)[0] || "last";
-      const plan = findPlan(session, id);
-      if (!plan) {
-        await message.reply("No such plan. Use `/plan list`.");
-        return true;
-      }
-      await sendLongReply(message, [`Plan \`${plan.id}\` (${plan.createdAt})`, "", plan.text || "(empty)"].join("\n"));
-      return true;
-    }
-
-    if (sub === "apply") {
-      if (!CONFIG.tasksEnabled) {
-        await message.reply("Tasks are disabled on this relay (RELAY_TASKS_ENABLED=false).");
-        return true;
-      }
-      ensureTasksShape(session);
-      ensureTaskLoopShape(session);
-      const id = (rest || "").split(/\s+/)[0] || "last";
-      const plan = findPlan(session, id);
-      if (!plan) {
-        await message.reply("No such plan. Use `/plan list`.");
-        return true;
-      }
-
-      const steps = parsePlanSteps(plan.text || "");
-      if (steps.length === 0) {
-        await message.reply("Plan has no parseable steps. Use '- [ ] ' checklist format.");
-        return true;
-      }
-
-      const pending = session.tasks.filter((t) => t && t.status === "pending").length;
-      const maxPending = Math.max(0, CONFIG.tasksMaxPending);
-      const room = maxPending > 0 ? Math.max(0, maxPending - pending) : steps.length;
-      const toAdd = steps.slice(0, room);
-      if (toAdd.length === 0) {
-        await message.reply(`Task queue is full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
-        return true;
-      }
-
-      for (const step of toAdd) {
-        session.tasks.push(createTask(session, step));
-      }
-      session.updatedAt = nowIso();
-      await queueSaveState();
-
-      const started = !taskRunnerByConversation.has(conversationKey);
-      if (started) {
-        session.taskLoop.running = true;
-        session.taskLoop.stopRequested = false;
-        session.taskLoop.currentTaskId = null;
-        session.updatedAt = nowIso();
-        await queueSaveState();
-        taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
-        void kickTaskRunner(conversationKey, message.channel, session, {
-          isDm: !message.guildId,
-          isThread: Boolean(message.channel && message.channel.isThread && message.channel.isThread()),
-        });
-      }
-
-      await message.reply(
-        started
-          ? `Applied \`${plan.id}\`: queued ${toAdd.length} task(s) and started runner.`
-          : `Applied \`${plan.id}\`: queued ${toAdd.length} task(s) (runner already running).`
-      );
-      return true;
-    }
-
-    await message.reply("Usage: `/plan new|list|show|apply`");
-    return true;
   }
 
   if (command.name === "handoff") {
@@ -3013,10 +3283,20 @@ async function handleCommand(message, session, command, conversationKey) {
       return true;
     }
     const commitNote = res.commitSummary ? ` (${res.commitSummary})` : "";
-
-    await message.reply(
-      `${dryRun ? "[dry-run] " : ""}Handoff written to ${res.files.map((p) => `\`${p}\``).join(", ")}${commitNote}`
-    );
+    if (dryRun) {
+      await sendLongReply(
+        message,
+        [
+          `[dry-run] Handoff entry (not written) would append to ${res.files.map((p) => `\`${p}\``).join(", ")}${commitNote}`,
+          "",
+          (res.entryText || "").trim() || "(empty handoff)",
+        ].join("\n")
+      );
+    } else {
+      await message.reply(
+        `Handoff written to ${res.files.map((p) => `\`${p}\``).join(", ")}${commitNote}`
+      );
+    }
     return true;
   }
 
@@ -3278,6 +3558,11 @@ async function handleCommand(message, session, command, conversationKey) {
         await message.reply(resolved.error);
         return true;
       }
+      const listed = await gitWorktreeList(repo.root);
+      if (!listed.ok) {
+        await message.reply(listed.error);
+        return true;
+      }
       const sessionWorkdir = session.workdir ? path.resolve(session.workdir) : "";
       const worktreeRoot = path.resolve(resolved.path);
       const containsActiveWorkdir = sessionWorkdir ? isSubPath(worktreeRoot, sessionWorkdir) : false;
@@ -3290,19 +3575,29 @@ async function handleCommand(message, session, command, conversationKey) {
         );
         return true;
       }
-      const removed = await gitWorktreeRemove(repo.root, resolved.path, force);
+      const otherWorktreePath = listed.worktrees
+        .map((wt) => path.resolve(wt.path))
+        .find((p) => p && p !== worktreeRoot) || "";
+      const fallbackWorkdir = otherWorktreePath && isAllowedWorkdir(otherWorktreePath) ? otherWorktreePath : CONFIG.defaultWorkdir;
+      const gitCwd = otherWorktreePath || repo.root;
+
+      const removed = await gitWorktreeRemove(gitCwd, resolved.path, force);
       if (!removed.ok) {
         await message.reply(removed.error);
         return true;
       }
       if (containsActiveWorkdir) {
-        session.workdir = repo.root;
+        session.workdir = fallbackWorkdir;
         session.threadId = null;
         session.contextVersion = 0;
         session.updatedAt = nowIso();
         await queueSaveState();
       }
-      await message.reply(`Removed worktree: \`${resolved.path}\``);
+      await message.reply(
+        containsActiveWorkdir
+          ? `Removed worktree: \`${resolved.path}\` (workdir -> \`${fallbackWorkdir}\`)`
+          : `Removed worktree: \`${resolved.path}\``
+      );
       return true;
     }
 
@@ -3471,9 +3766,16 @@ async function main() {
       const command = parseCommand(prompt);
       if (command) {
         // Step 3 robustness: refuse workdir/session control while task runner is active.
-        if (isTaskRunnerActive(key, session) && (command.name === "workdir" || command.name === "reset" || command.name === "attach")) {
-          await message.reply("Refusing while task runner is active. Run `/task stop` first.");
-          return;
+        if (isTaskRunnerActive(key, session)) {
+          const isDangerous =
+            command.name === "workdir" ||
+            command.name === "reset" ||
+            command.name === "attach" ||
+            (command.name === "context" && command.arg.toLowerCase() === "reload");
+          if (isDangerous) {
+            await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+            return;
+          }
         }
         // `/task stop` must be responsive; handle it outside the per-conversation queue so
         // it can kill an in-flight child process immediately.

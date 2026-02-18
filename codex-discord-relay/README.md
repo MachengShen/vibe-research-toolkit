@@ -20,6 +20,8 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/context reload`
   - `/task ...`
   - `/worktree ...`
+  - `/plan ...`
+  - `/handoff ...`
   - `/help`
 
 ## Setup
@@ -128,6 +130,7 @@ Env knobs:
 - `RELAY_TASKS_MAX_PENDING=<int>` (default `50`)
 - `RELAY_TASKS_STOP_ON_ERROR=true|false` (default `false`)
 - `RELAY_TASKS_POST_FULL_OUTPUT=true|false` (default `true`)
+- `RELAY_TASKS_SUMMARY_AFTER_RUN=true|false` (default `true`)
 
 ## Git Worktrees
 
@@ -147,20 +150,22 @@ Env knobs:
 
 Commands:
 
-- `/plan new <request...>`: generate and save a plan (Codex run uses `--sandbox read-only`).
+- `/plan <request...>` (or `/plan new <request...>`): generate and save a plan (Codex run uses `--sandbox read-only`).
 - `/plan list`: list saved plans for this conversation.
 - `/plan show <id|last>`: show a saved plan.
-- `/plan apply <id|last>`: convert plan steps to `/task` items and start the task runner.
+- `/plan apply <id|last> [--confirm]`: execute a saved plan (agent edits repo).
 
 Notes:
 
-- Plan generation uses `codex exec --sandbox read-only` (stateless) so it cannot write files.
-- For best results, keep plans in checklist format (`- [ ] step` per line).
+- Plan generation uses `codex exec --sandbox read-only` (stateless) so it cannot write files; the relay saves the resulting Markdown to `$RELAY_STATE_DIR/plans/<conversationKey>/<planId>.md`.
+- Plan apply runs the configured agent provider in normal mode (Codex/Claude) and passes the saved plan text as context.
+- In guild channels, plan apply may require `--confirm` (see env knob below).
 
 Env knobs:
 
 - `RELAY_PLANS_ENABLED=true|false`
 - `RELAY_PLANS_MAX_HISTORY=<int>` (default `20`)
+- `RELAY_PLAN_APPLY_REQUIRE_CONFIRM_IN_GUILDS=true|false` (default `true`)
 
 ## Handoff And Working Memory
 
@@ -173,16 +178,30 @@ Commands:
 Notes:
 
 - The relay appends to the files itself; Codex is used only to *generate* the text in read-only mode.
-- If `RELAY_HANDOFF_AUTO_ENABLED=true`, a handoff is written automatically after `/task run` completes.
+- If `RELAY_AUTO_HANDOFF_AFTER_TASK_RUN=true`, a handoff is written automatically after `/task run` completes.
+- If `RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY=true`, a handoff is written automatically after `/plan apply` completes.
+- `RELAY_HANDOFF_AUTO_ENABLED` is a legacy alias for enabling both auto-handoff behaviors above.
 
 Env knobs:
 
 - `RELAY_HANDOFF_ENABLED=true|false`
 - `RELAY_HANDOFF_FILES="HANDOFF_LOG.md;docs/WORKING_MEMORY.md"` (semicolon-separated)
-- `RELAY_HANDOFF_AUTO_ENABLED=true|false` (default `false`)
+- `RELAY_HANDOFF_AUTO_ENABLED=true|false` (legacy; default `false`)
+- `RELAY_AUTO_HANDOFF_AFTER_TASK_RUN=true|false` (default `false`)
+- `RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY=true|false` (default `false`)
 - `RELAY_HANDOFF_GIT_AUTO_COMMIT=true|false` (default `false`)
 - `RELAY_HANDOFF_GIT_AUTO_PUSH=true|false` (default `false`)
 - `RELAY_HANDOFF_GIT_COMMIT_MESSAGE="..."` (default `chore: relay handoff`)
+
+## Optional Git Auto-Commit
+
+If enabled, the relay will `git add -A && git commit` after successful `/task` steps and/or `/plan apply` when the repo has changes. It never auto-pushes.
+
+Env knobs:
+
+- `RELAY_GIT_AUTO_COMMIT=true|false` (default `false`)
+- `RELAY_GIT_AUTO_COMMIT_SCOPE=task|plan|both` (default `both`)
+- `RELAY_GIT_COMMIT_PREFIX="ai:"` (default `ai:`)
 
 ## Agent Context Bootstrap
 

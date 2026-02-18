@@ -18,6 +18,8 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/upload <path>`
   - `/context`
   - `/context reload`
+  - `/task ...`
+  - `/worktree ...`
   - `/help`
 
 ## Setup
@@ -100,12 +102,45 @@ codex-discord-relay-multictl logs default
 - Default `CODEX_APPROVAL=never` (Codex mode) prevents approval prompts from blocking mobile usage.
 - Default `CODEX_SANDBOX=danger-full-access` matches the YOLO/no-permission flow; set it to `workspace-write` if you want tighter sandboxing.
 - `/workdir` is restricted by `CODEX_ALLOWED_WORKDIR_ROOTS`.
+- `/task ...` is a persistent per-conversation task queue with an auto-runner ("Ralph loop"). Tune with `RELAY_TASKS_ENABLED`, `RELAY_TASKS_MAX_PENDING`, `RELAY_TASKS_STOP_ON_ERROR`, `RELAY_TASKS_POST_FULL_OUTPUT`.
+- `/worktree ...` manages `git worktree` under `RELAY_WORKTREE_ROOT_DIR` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`).
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - Image uploads: Codex can ask the relay to upload a local image by including `[[upload:some.png]]` in its response (or you can use `/upload some.png`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`.
 - If Discord is blocked on your network, the relay supports proxies via `DISCORD_GATEWAY_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`.
   It will also automatically source `/root/.openclaw/proxy.env` when starting (same proxy config used by OpenClaw).
 - `/attach` is **DM-only by default**. Set `RELAY_ATTACH_ALLOW_GUILDS=true` if you intentionally want to allow attaching sessions in guild channels.
+
+## Task Queue (Ralph Loop)
+
+Commands:
+
+- `/task add <text...>`: append a pending task to this conversation.
+- `/task list`: show the queue.
+- `/task run`: run tasks sequentially until empty/blocked/stopped.
+- `/task stop`: stop immediately (kills the in-flight agent child process).
+- `/task clear [done|all]`: clear completed tasks (or everything).
+
+Env knobs:
+
+- `RELAY_TASKS_ENABLED=true|false`
+- `RELAY_TASKS_MAX_PENDING=<int>` (default `50`)
+- `RELAY_TASKS_STOP_ON_ERROR=true|false` (default `false`)
+- `RELAY_TASKS_POST_FULL_OUTPUT=true|false` (default `true`)
+
+## Git Worktrees
+
+Commands:
+
+- `/worktree list`: show `git worktree list --porcelain` for the current repo.
+- `/worktree new <name> [--from <ref>] [--use]`: create a new worktree (branch `wt/<name>`).
+- `/worktree use <name>`: switch workdir to an existing worktree and reset session/context.
+- `/worktree rm <name> [--force]`: remove a worktree (refuses if it is active unless `--force`).
+- `/worktree prune`: run `git worktree prune`.
+
+Env knobs:
+
+- `RELAY_WORKTREE_ROOT_DIR=/abs/path` (default `$RELAY_STATE_DIR/worktrees`)
 
 ## Agent Context Bootstrap
 

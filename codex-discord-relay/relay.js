@@ -2,6 +2,7 @@
 "use strict";
 
 const fsp = require("node:fs/promises");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
@@ -149,16 +150,36 @@ const RELAY_UPLOAD_ROOT_DIR = path.resolve(
   process.env.RELAY_UPLOAD_ROOT_DIR || path.join(RELAY_STATE_DIR, "uploads")
 );
 
+const CODEX_ALLOWED_WORKDIR_ROOTS = (() => {
+  const roots = parseCsv(process.env.CODEX_ALLOWED_WORKDIR_ROOTS || "/root");
+  return Array.from(roots).map((root) => path.resolve(root));
+})();
+
+const RAW_RELAY_WORKTREE_ROOT_DIR = (process.env.RELAY_WORKTREE_ROOT_DIR || "").trim();
+const RELAY_WORKTREE_ROOT_DIR = path.resolve(
+  RAW_RELAY_WORKTREE_ROOT_DIR || path.join(RELAY_STATE_DIR, "worktrees")
+);
+const RELAY_WORKTREE_ROOT_DIR_ERROR = (() => {
+  if (RAW_RELAY_WORKTREE_ROOT_DIR && !path.isAbsolute(RAW_RELAY_WORKTREE_ROOT_DIR)) {
+    return "RELAY_WORKTREE_ROOT_DIR must be an absolute path";
+  }
+  const allowed = CODEX_ALLOWED_WORKDIR_ROOTS.some((root) => {
+    const relative = path.relative(root, RELAY_WORKTREE_ROOT_DIR);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+  if (!allowed) {
+    return `RELAY_WORKTREE_ROOT_DIR is outside CODEX_ALLOWED_WORKDIR_ROOTS (${CODEX_ALLOWED_WORKDIR_ROOTS.join(", ")})`;
+  }
+  return "";
+})();
+
 const CONFIG = {
   token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
   agentProvider: normalizeAgentProvider(process.env.RELAY_AGENT_PROVIDER || process.env.AGENT_PROVIDER),
   codexBin: (process.env.CODEX_BIN || "codex").trim(),
   claudeBin: (process.env.CLAUDE_BIN || "claude").trim(),
   defaultWorkdir: path.resolve(process.env.CODEX_WORKDIR || "/root"),
-  allowedWorkdirRoots: (() => {
-    const roots = parseCsv(process.env.CODEX_ALLOWED_WORKDIR_ROOTS || "/root");
-    return Array.from(roots).map((root) => path.resolve(root));
-  })(),
+  allowedWorkdirRoots: CODEX_ALLOWED_WORKDIR_ROOTS,
   model: (process.env.CODEX_MODEL || "").trim(),
   claudeModel: (process.env.CLAUDE_MODEL || process.env.CODEX_MODEL || "").trim(),
   claudePermissionMode: resolveClaudePermissionMode(),
@@ -206,6 +227,14 @@ const CONFIG = {
     intEnv("RELAY_CONTEXT_MAX_CHARS_PER_FILE", intEnv("RELAY_CONTEXT_MAX_CHARS", 40000))
   ),
   contextSpecs: parseContextSpecs(process.env.RELAY_CONTEXT_FILE || ""),
+
+  tasksEnabled: boolEnv("RELAY_TASKS_ENABLED", true),
+  tasksMaxPending: Math.max(1, intEnv("RELAY_TASKS_MAX_PENDING", 50)),
+  tasksStopOnError: boolEnv("RELAY_TASKS_STOP_ON_ERROR", false),
+  tasksPostFullOutput: boolEnv("RELAY_TASKS_POST_FULL_OUTPUT", true),
+
+  worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
+  worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
 
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
@@ -257,6 +286,8 @@ const state = {
 };
 let saveChain = Promise.resolve();
 const queueByConversation = new Map();
+const activeChildByConversation = new Map();
+const taskRunnerByConversation = new Map();
 
 function isSubPath(parentDir, childDir) {
   const relative = path.relative(parentDir, childDir);
@@ -388,6 +419,132 @@ async function resolveAndValidateUploads(conversationKey, rawPaths) {
   return { conversationDir, files, errors };
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function ensureTaskLoopShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!session.taskLoop || typeof session.taskLoop !== "object") {
+    session.taskLoop = { running: false, stopRequested: false, currentTaskId: null };
+    return true;
+  }
+  if (typeof session.taskLoop.running !== "boolean") {
+    session.taskLoop.running = false;
+    changed = true;
+  }
+  if (typeof session.taskLoop.stopRequested !== "boolean") {
+    session.taskLoop.stopRequested = false;
+    changed = true;
+  }
+  if (session.taskLoop.currentTaskId != null && typeof session.taskLoop.currentTaskId !== "string") {
+    session.taskLoop.currentTaskId = null;
+    changed = true;
+  }
+  return changed;
+}
+
+function normalizeTaskObject(task, fallbackId) {
+  if (!task || typeof task !== "object") return false;
+  let changed = false;
+  const validStatuses = new Set(["pending", "running", "done", "failed", "blocked", "canceled"]);
+
+  if (typeof task.id !== "string" || !task.id.trim()) {
+    task.id = String(fallbackId || `t-${Date.now()}`);
+    changed = true;
+  }
+  if (typeof task.text !== "string") {
+    task.text = String(task.text || "");
+    changed = true;
+  }
+  const status = String(task.status || "pending").toLowerCase();
+  if (!validStatuses.has(status)) {
+    task.status = "pending";
+    changed = true;
+  } else if (task.status !== status) {
+    task.status = status;
+    changed = true;
+  }
+
+  if (typeof task.createdAt !== "string" || !task.createdAt) {
+    task.createdAt = nowIso();
+    changed = true;
+  }
+  if (task.startedAt != null && typeof task.startedAt !== "string") {
+    task.startedAt = null;
+    changed = true;
+  }
+  if (task.finishedAt != null && typeof task.finishedAt !== "string") {
+    task.finishedAt = null;
+    changed = true;
+  }
+  if (typeof task.attempts !== "number" || !Number.isFinite(task.attempts) || task.attempts < 0) {
+    task.attempts = 0;
+    changed = true;
+  }
+  if (task.lastError != null && typeof task.lastError !== "string") {
+    task.lastError = String(task.lastError || "");
+    changed = true;
+  }
+  if (task.lastResultPreview != null && typeof task.lastResultPreview !== "string") {
+    task.lastResultPreview = String(task.lastResultPreview || "");
+    changed = true;
+  }
+  return changed;
+}
+
+function ensureTasksShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!Array.isArray(session.tasks)) {
+    session.tasks = [];
+    changed = true;
+  }
+  for (let i = 0; i < session.tasks.length; i += 1) {
+    const task = session.tasks[i];
+    changed = normalizeTaskObject(task, `t-${String(i + 1).padStart(4, "0")}`) || changed;
+  }
+  return changed;
+}
+
+function normalizeSessionAfterLoad(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  changed = ensureTasksShape(session) || changed;
+  changed = ensureTaskLoopShape(session) || changed;
+
+  // After a relay restart, there is no running in-memory runner/child. Reset any
+  // in-flight task state so `/task list` doesn't show stuck tasks.
+  if (Array.isArray(session.tasks)) {
+    for (const task of session.tasks) {
+      if (!task || typeof task !== "object") continue;
+      if (task.status === "running") {
+        task.status = "pending";
+        task.startedAt = null;
+        task.finishedAt = null;
+        task.lastError = task.lastError || "interrupted by relay restart";
+        changed = true;
+      }
+    }
+  }
+  if (session.taskLoop && typeof session.taskLoop === "object") {
+    if (session.taskLoop.running) {
+      session.taskLoop.running = false;
+      changed = true;
+    }
+    if (session.taskLoop.stopRequested) {
+      session.taskLoop.stopRequested = false;
+      changed = true;
+    }
+    if (session.taskLoop.currentTaskId) {
+      session.taskLoop.currentTaskId = null;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function ensureStateLoaded() {
   await fsp.mkdir(CONFIG.stateDir, { recursive: true });
   if (CONFIG.uploadEnabled) {
@@ -399,6 +556,11 @@ async function ensureStateLoaded() {
     if (parsed && typeof parsed === "object" && parsed.sessions && typeof parsed.sessions === "object") {
       state.version = Number(parsed.version || 1);
       state.sessions = parsed.sessions;
+      let mutated = false;
+      for (const session of Object.values(state.sessions)) {
+        mutated = normalizeSessionAfterLoad(session) || mutated;
+      }
+      if (mutated) await queueSaveState();
       return;
     }
   } catch {}
@@ -726,12 +888,18 @@ function getConversationKey(message) {
 
 function getSession(key) {
   const existing = state.sessions[key];
-  if (existing && typeof existing === "object") return existing;
+  if (existing && typeof existing === "object") {
+    ensureTasksShape(existing);
+    ensureTaskLoopShape(existing);
+    return existing;
+  }
   const created = {
     threadId: null,
     workdir: CONFIG.defaultWorkdir,
     contextVersion: 0,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso(),
+    tasks: [],
+    taskLoop: { running: false, stopRequested: false, currentTaskId: null },
   };
   state.sessions[key] = created;
   return created;
@@ -747,7 +915,7 @@ function extractPrompt(message, botUserId) {
 }
 
 function parseCommand(prompt) {
-  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload|context)\b(?:\s+([\s\S]+))?$/i);
+  const match = prompt.match(/^\/(help|status|reset|workdir|attach|upload|context|task|worktree)\b(?:\s+([\s\S]+))?$/i);
   if (!match) return null;
   return {
     name: match[1].toLowerCase(),
@@ -938,7 +1106,7 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
   ];
   if (CONFIG.uploadEnabled) {
@@ -1040,7 +1208,7 @@ function waitForChildExit(child, label) {
   });
 }
 
-async function runCodex(session, prompt, extraEnv, onProgress) {
+async function runCodex(session, prompt, extraEnv, onProgress, conversationKey) {
   const args = buildCodexArgs(session, prompt);
   const env =
     extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
@@ -1048,6 +1216,7 @@ async function runCodex(session, prompt, extraEnv, onProgress) {
     cwd: session.workdir || CONFIG.defaultWorkdir,
     env,
   });
+  if (conversationKey) activeChildByConversation.set(conversationKey, child);
 
   let threadId = session.threadId || null;
   let finalText = "";
@@ -1055,50 +1224,62 @@ async function runCodex(session, prompt, extraEnv, onProgress) {
   const rawStdoutLines = [];
 
   const stdoutRl = readline.createInterface({ input: child.stdout });
-  stdoutRl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    try {
-      const evt = JSON.parse(trimmed);
-      if (evt.type === "thread.started" && typeof evt.thread_id === "string") {
-        threadId = evt.thread_id;
-      }
-      if (
-        evt.type === "item.completed" &&
-        evt.item &&
-        evt.item.type === "agent_message" &&
-        typeof evt.item.text === "string"
-      ) {
-        finalText = evt.item.text;
-      }
-      const summary = summarizeCodexProgressEvent(evt);
-      if (summary) emitProgress(onProgress, summary);
-      return;
-    } catch {}
-    rawStdoutLines.push(trimmed);
-    if (rawStdoutLines.length > 60) rawStdoutLines.shift();
-  });
-
   const stderrRl = readline.createInterface({ input: child.stderr });
-  stderrRl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    if (trimmed.includes("state db missing rollout path for thread")) return;
-    stderrLines.push(trimmed);
-    if (stderrLines.length > 80) stderrLines.shift();
-  });
+  try {
+    stdoutRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const evt = JSON.parse(trimmed);
+        if (evt.type === "thread.started" && typeof evt.thread_id === "string") {
+          threadId = evt.thread_id;
+        }
+        if (
+          evt.type === "item.completed" &&
+          evt.item &&
+          evt.item.type === "agent_message" &&
+          typeof evt.item.text === "string"
+        ) {
+          finalText = evt.item.text;
+        }
+        const summary = summarizeCodexProgressEvent(evt);
+        if (summary) emitProgress(onProgress, summary);
+        return;
+      } catch {}
+      rawStdoutLines.push(trimmed);
+      if (rawStdoutLines.length > 60) rawStdoutLines.shift();
+    });
 
-  const exitCode = await waitForChildExit(child, "codex");
+    stderrRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      if (trimmed.includes("state db missing rollout path for thread")) return;
+      stderrLines.push(trimmed);
+      if (stderrLines.length > 80) stderrLines.shift();
+    });
 
-  if (exitCode !== 0) {
-    const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-20).join("\n");
-    throw new Error(`codex exit ${exitCode}\n${detail}`.trim());
+    const exitCode = await waitForChildExit(child, "codex");
+
+    if (exitCode !== 0) {
+      const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-20).join("\n");
+      throw new Error(`codex exit ${exitCode}\n${detail}`.trim());
+    }
+
+    if (!finalText) {
+      finalText = rawStdoutLines.join("\n").trim() || "No message returned by Codex.";
+    }
+    return { threadId, text: finalText };
+  } finally {
+    try {
+      stdoutRl.close();
+    } catch {}
+    try {
+      stderrRl.close();
+    } catch {}
+    if (conversationKey && activeChildByConversation.get(conversationKey) === child) {
+      activeChildByConversation.delete(conversationKey);
+    }
   }
-
-  if (!finalText) {
-    finalText = rawStdoutLines.join("\n").trim() || "No message returned by Codex.";
-  }
-  return { threadId, text: finalText };
 }
 
 function buildClaudeArgs(session, prompt) {
@@ -1126,7 +1307,7 @@ function extractClaudeTextFromJson(parsed, fallbackText) {
   return fallbackText;
 }
 
-async function runClaude(session, prompt, extraEnv, onProgress) {
+async function runClaude(session, prompt, extraEnv, onProgress, conversationKey) {
   const args = buildClaudeArgs(session, prompt);
   const env =
     extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
@@ -1135,6 +1316,7 @@ async function runClaude(session, prompt, extraEnv, onProgress) {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  if (conversationKey) activeChildByConversation.set(conversationKey, child);
 
   let threadId = session.threadId || null;
   let parsedResult = null;
@@ -1144,60 +1326,72 @@ async function runClaude(session, prompt, extraEnv, onProgress) {
   const stderrLines = [];
 
   const stdoutRl = readline.createInterface({ input: child.stdout });
-  stdoutRl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    rawStdoutLines.push(trimmed);
-    if (rawStdoutLines.length > 400) rawStdoutLines.shift();
-
-    let evt = null;
-    try {
-      evt = JSON.parse(trimmed);
-    } catch {
-      return;
-    }
-    if (!evt || typeof evt !== "object") return;
-
-    if (typeof evt.session_id === "string" && evt.session_id) {
-      threadId = evt.session_id;
-    }
-    if (evt.type === "assistant") lastAssistantEvent = evt;
-    if (evt.type === "result") parsedResult = evt;
-
-    const summary = summarizeClaudeProgressEvent(evt, toolNamesById);
-    if (summary) emitProgress(onProgress, summary);
-  });
-
   const stderrRl = readline.createInterface({ input: child.stderr });
-  stderrRl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    stderrLines.push(trimmed);
-    if (stderrLines.length > 80) stderrLines.shift();
-  });
+  try {
+    stdoutRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      rawStdoutLines.push(trimmed);
+      if (rawStdoutLines.length > 400) rawStdoutLines.shift();
 
-  const exitCode = await waitForChildExit(child, "claude");
+      let evt = null;
+      try {
+        evt = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (!evt || typeof evt !== "object") return;
 
-  const stdoutTrimmed = rawStdoutLines.join("\n").trim();
-  if (exitCode !== 0) {
-    const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-40).join("\n");
-    throw new Error(`claude exit ${exitCode}\n${detail}`.trim());
+      if (typeof evt.session_id === "string" && evt.session_id) {
+        threadId = evt.session_id;
+      }
+      if (evt.type === "assistant") lastAssistantEvent = evt;
+      if (evt.type === "result") parsedResult = evt;
+
+      const summary = summarizeClaudeProgressEvent(evt, toolNamesById);
+      if (summary) emitProgress(onProgress, summary);
+    });
+
+    stderrRl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      stderrLines.push(trimmed);
+      if (stderrLines.length > 80) stderrLines.shift();
+    });
+
+    const exitCode = await waitForChildExit(child, "claude");
+
+    const stdoutTrimmed = rawStdoutLines.join("\n").trim();
+    if (exitCode !== 0) {
+      const detail = stderrLines.slice(-20).join("\n") || rawStdoutLines.slice(-40).join("\n");
+      throw new Error(`claude exit ${exitCode}\n${detail}`.trim());
+    }
+
+    const parsed = parsedResult || lastAssistantEvent;
+    const fallbackText =
+      extractClaudeTextFromJson(lastAssistantEvent, "").trim() ||
+      stdoutTrimmed ||
+      "No message returned by Claude.";
+    const text = extractClaudeTextFromJson(parsed, fallbackText);
+    return { threadId: threadId || session.threadId || null, text };
+  } finally {
+    try {
+      stdoutRl.close();
+    } catch {}
+    try {
+      stderrRl.close();
+    } catch {}
+    if (conversationKey && activeChildByConversation.get(conversationKey) === child) {
+      activeChildByConversation.delete(conversationKey);
+    }
   }
-
-  const parsed = parsedResult || lastAssistantEvent;
-  const fallbackText =
-    extractClaudeTextFromJson(lastAssistantEvent, "").trim() ||
-    stdoutTrimmed ||
-    "No message returned by Claude.";
-  const text = extractClaudeTextFromJson(parsed, fallbackText);
-  return { threadId: threadId || session.threadId || null, text };
 }
 
-async function runAgent(session, prompt, extraEnv, onProgress) {
+async function runAgent(session, prompt, extraEnv, onProgress, conversationKey) {
   if (CONFIG.agentProvider === "claude") {
-    return runClaude(session, prompt, extraEnv, onProgress);
+    return runClaude(session, prompt, extraEnv, onProgress, conversationKey);
   }
-  return runCodex(session, prompt, extraEnv, onProgress);
+  return runCodex(session, prompt, extraEnv, onProgress, conversationKey);
 }
 
 function isStaleThreadResumeError(err) {
@@ -1230,6 +1424,615 @@ async function sendLongReply(baseMessage, text) {
   }
 }
 
+async function sendLongToChannel(channel, text) {
+  const chunks = splitMessage(text, Math.max(300, CONFIG.maxReplyChars));
+  for (const content of chunks) {
+    await channel.send(content);
+  }
+}
+
+function splitFirstToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { head: "", rest: "" };
+  const m = raw.match(/^(\S+)(?:\s+([\s\S]+))?$/);
+  return { head: (m && m[1] ? m[1] : "").trim(), rest: (m && m[2] ? m[2] : "").trim() };
+}
+
+function taskTextPreview(text, maxLen = 60) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+  if (raw.length <= maxLen) return raw;
+  return `${raw.slice(0, maxLen - 1)}…`;
+}
+
+function nextTaskId(session) {
+  const tasks = session && Array.isArray(session.tasks) ? session.tasks : [];
+  let max = 0;
+  for (const t of tasks) {
+    if (!t || typeof t !== "object") continue;
+    const m = String(t.id || "").match(/^t-(\d{4})$/);
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return `t-${String(max + 1).padStart(4, "0")}`;
+}
+
+function createTask(session, text) {
+  const id = nextTaskId(session);
+  const createdAt = nowIso();
+  return {
+    id,
+    text: String(text || ""),
+    status: "pending",
+    createdAt,
+    startedAt: null,
+    finishedAt: null,
+    attempts: 0,
+    lastError: null,
+    lastResultPreview: null,
+  };
+}
+
+function findNextPendingTask(session) {
+  if (!session || !Array.isArray(session.tasks)) return null;
+  return session.tasks.find((t) => t && typeof t === "object" && t.status === "pending") || null;
+}
+
+function parseTaskMarkers(text) {
+  const raw = String(text || "");
+  const blocked = /\[\[task:blocked\]\]/i.test(raw);
+  const done = /\[\[task:done\]\]/i.test(raw);
+  const cleaned = raw.replace(/\[\[task:(?:blocked|done)\]\]/gi, "").trim();
+  if (blocked) return { status: "blocked", cleaned };
+  if (done) return { status: "done", cleaned };
+  return { status: "done", cleaned };
+}
+
+function requestStopConversation(conversationKey, session) {
+  const runner = taskRunnerByConversation.get(conversationKey);
+  if (runner) runner.stopRequested = true;
+  if (session && typeof session === "object") {
+    ensureTaskLoopShape(session);
+    session.taskLoop.stopRequested = true;
+    session.updatedAt = nowIso();
+    void queueSaveState();
+  }
+
+  const child = activeChildByConversation.get(conversationKey);
+  if (!child) {
+    logRelayEvent("task.stop_requested", { conversationKey, hasChild: false });
+    return false;
+  }
+  logRelayEvent("task.stop_requested", { conversationKey, hasChild: true });
+  try {
+    child.kill("SIGTERM");
+  } catch {}
+  setTimeout(() => {
+    try {
+      if (!child.killed) child.kill("SIGKILL");
+    } catch {}
+  }, 5000).unref?.();
+  return true;
+}
+
+async function runAgentAndPostToDiscord({
+  baseMessage,
+  channel,
+  session,
+  conversationKey,
+  prompt,
+  isDm,
+  isThread,
+  reasonLabel,
+  postFullOutput = true,
+}) {
+  const runLabel = reasonLabel ? `${reasonLabel}` : "request";
+  const pendingMsg = baseMessage && typeof baseMessage.reply === "function"
+    ? await baseMessage.reply(`Running ${AGENT_LABEL}...`)
+    : await channel.send(`Running ${AGENT_LABEL}... (${runLabel})`);
+
+  const wasAlreadyQueued = queueByConversation.has(conversationKey);
+  const progress = createProgressReporter(pendingMsg, conversationKey);
+  if (wasAlreadyQueued) {
+    progress.note("Waiting for an earlier request in this conversation");
+  }
+
+  logRelayEvent("message.queued", {
+    conversationKey,
+    provider: CONFIG.agentProvider,
+    promptChars: String(prompt || "").length,
+    sessionId: session.threadId || null,
+    reason: runLabel,
+  });
+
+  return enqueueConversation(conversationKey, async () => {
+    const startedAt = Date.now();
+    try {
+      progress.note(`Starting ${AGENT_LABEL} run`);
+      void channel
+        .sendTyping?.()
+        ?.catch((err) =>
+          logRelayEvent("discord.sendTyping.error", {
+            conversationKey,
+            error: String(err && err.message ? err.message : err).slice(0, 240),
+          })
+        );
+
+      const uploadDir = getConversationUploadDir(conversationKey);
+      if (CONFIG.uploadEnabled) {
+        await fsp.mkdir(uploadDir, { recursive: true });
+      }
+
+      logRelayEvent("agent.run.start", {
+        conversationKey,
+        provider: CONFIG.agentProvider,
+        sessionId: session.threadId || null,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
+        reason: runLabel,
+      });
+
+      let contextInjected = false;
+      let result;
+      try {
+        const firstPrompt = await buildAgentPrompt(session, prompt, {
+          conversationKey,
+          uploadDir,
+          isDm,
+          isThread,
+        });
+        contextInjected = firstPrompt.contextInjected;
+        if (firstPrompt.contextInjected) {
+          const injectedChars =
+            firstPrompt.contextMeta && typeof firstPrompt.contextMeta.injectedChars === "number"
+              ? firstPrompt.contextMeta.injectedChars
+              : 0;
+          const includedFiles =
+            firstPrompt.contextMeta && typeof firstPrompt.contextMeta.includedFiles === "number"
+              ? firstPrompt.contextMeta.includedFiles
+              : 0;
+          logRelayEvent("agent.run.context_injected", {
+            conversationKey,
+            provider: CONFIG.agentProvider,
+            sessionId: session.threadId || null,
+            contextVersion: CONFIG.contextVersion,
+            contextChars: injectedChars,
+            contextFiles: includedFiles,
+          });
+          progress.note(
+            includedFiles > 0
+              ? `Loaded relay runtime context (+${includedFiles} context file${includedFiles === 1 ? "" : "s"})`
+              : "Loaded relay runtime context"
+          );
+        }
+        result = await runAgent(
+          session,
+          firstPrompt.prompt,
+          CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
+          (line) => progress.note(line),
+          conversationKey
+        );
+      } catch (runErr) {
+        if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
+        const staleThreadId = session.threadId;
+        session.threadId = null;
+        session.updatedAt = nowIso();
+        await queueSaveState();
+        logRelayEvent("agent.run.retry_stale_session", {
+          conversationKey,
+          provider: CONFIG.agentProvider,
+          staleSessionId: staleThreadId,
+        });
+        progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
+        const retryPrompt = await buildAgentPrompt(session, prompt, {
+          conversationKey,
+          uploadDir,
+          isDm,
+          isThread,
+        });
+        contextInjected = contextInjected || retryPrompt.contextInjected;
+        result = await runAgent(
+          session,
+          retryPrompt.prompt,
+          CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
+          (line) => progress.note(line),
+          conversationKey
+        );
+        result.text =
+          `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
+          (result.text || "");
+      }
+
+      session.threadId = result.threadId || session.threadId;
+      if (contextInjected) session.contextVersion = CONFIG.contextVersion;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      logRelayEvent("agent.run.done", {
+        conversationKey,
+        provider: CONFIG.agentProvider,
+        durationMs: Date.now() - startedAt,
+        sessionId: session.threadId || null,
+        resultChars: (result.text || "").length,
+        reason: runLabel,
+      });
+
+      let answer = result.text || "No response.";
+      let uploadPaths = [];
+      if (CONFIG.uploadEnabled) {
+        const parsed = extractUploadMarkers(answer);
+        answer = parsed.text;
+        uploadPaths = parsed.rawPaths || [];
+      }
+
+      const posted = postFullOutput
+        ? answer
+        : (() => {
+            const max = Math.max(200, Math.min(1800, CONFIG.maxReplyChars));
+            if (answer.length <= max) return answer;
+            return `${answer.slice(0, Math.max(0, max - 24)).trim()}\n...[output truncated]`;
+          })();
+
+      await progress.stop();
+      const chunks = splitMessage(posted, Math.max(300, CONFIG.maxReplyChars));
+      await pendingMsg.edit(chunks[0]);
+      for (let i = 1; i < chunks.length; i += 1) {
+        await channel.send(chunks[i]);
+      }
+
+      if (CONFIG.uploadEnabled && uploadPaths.length > 0) {
+        const { files, errors } = await resolveAndValidateUploads(conversationKey, uploadPaths);
+        if (files.length > 0) {
+          for (let i = 0; i < files.length; i += 10) {
+            const batch = files.slice(i, i + 10);
+            const names = batch.map((f) => `\`${f.name}\``).join(", ");
+            await channel.send({ content: `Uploaded: ${names}`, files: batch });
+          }
+        }
+        if (errors.length > 0) {
+          await channel.send(`Upload notes:\n${errors.map((e) => `- ${e}`).join("\n")}`);
+        }
+      }
+
+      return { ok: true, threadId: session.threadId || null, text: answer };
+    } catch (err) {
+      await progress.stop();
+      const detail = String(err.message || err).slice(0, 1800);
+      logRelayEvent("message.failed", {
+        conversationKey,
+        provider: CONFIG.agentProvider,
+        durationMs: Date.now() - startedAt,
+        sessionId: session.threadId || null,
+        error: detail.slice(0, 240),
+        reason: runLabel,
+      });
+      const errorBody = `${AGENT_LABEL} error:\n\`\`\`\n${detail}\n\`\`\``;
+      try {
+        await pendingMsg.edit(errorBody);
+      } catch (editErr) {
+        logRelayEvent("message.error_edit_failed", {
+          conversationKey,
+          error: String(editErr && editErr.message ? editErr.message : editErr).slice(0, 240),
+        });
+        try {
+          if (baseMessage) await sendLongReply(baseMessage, errorBody);
+          else await sendLongToChannel(channel, errorBody);
+        } catch {}
+      }
+      return { ok: false, error: detail };
+    }
+  });
+}
+
+function sanitizeWorktreeName(raw) {
+  const name = String(raw || "").trim();
+  if (!name) return "";
+  if (name === "." || name === "..") return "";
+  // Keep it strict: avoid path traversal and surprising unicode. Users can always pick a simpler name.
+  if (!/^[a-zA-Z0-9._-]{1,64}$/.test(name)) return "";
+  return name;
+}
+
+function parseWorktreeNewArgs(tokens) {
+  const out = { ok: true, fromRef: "HEAD", use: false };
+  const args = Array.isArray(tokens) ? tokens : [];
+  for (let i = 0; i < args.length; i += 1) {
+    const t = args[i];
+    if (t === "--use") {
+      out.use = true;
+      continue;
+    }
+    if (t === "--from") {
+      const ref = args[i + 1];
+      if (!ref) return { ok: false, error: "Usage: `/worktree new <name> [--from <ref>] [--use]`" };
+      out.fromRef = ref;
+      i += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown flag: ${t}` };
+  }
+  return out;
+}
+
+async function execFileCapture(cmd, args, { cwd, timeoutMs } = {}) {
+  const finalCwd = cwd || process.cwd();
+  const maxBytes = 200 * 1024;
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(cmd, args, { cwd: finalCwd, env: process.env });
+
+    const killTimer =
+      timeoutMs && timeoutMs > 0
+        ? setTimeout(() => {
+            try {
+              child.kill("SIGTERM");
+            } catch {}
+            setTimeout(() => {
+              try {
+                child.kill("SIGKILL");
+              } catch {}
+            }, 5000).unref?.();
+          }, timeoutMs)
+        : null;
+
+    const collect = (chunk, sink) => {
+      if (!chunk) return "";
+      const s = chunk.toString("utf8");
+      if (sink.length >= maxBytes) return sink;
+      return (sink + s).slice(0, maxBytes);
+    };
+
+    if (child.stdout) {
+      child.stdout.on("data", (d) => {
+        stdout = collect(d, stdout);
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on("data", (d) => {
+        stderr = collect(d, stderr);
+      });
+    }
+
+    child.on("error", (err) => {
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code: 127, stdout, stderr: `${stderr}\n${String(err.message || err)}`.trim() });
+    });
+    child.on("close", (code) => {
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code: typeof code === "number" ? code : 1, stdout, stderr });
+    });
+  });
+}
+
+async function resolveGitRepoRoot(cwd) {
+  const res = await execFileCapture("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: 15000 });
+  if (res.code !== 0) {
+    return {
+      ok: false,
+      error: "Not a git repo (run `/workdir` into a git repo first).",
+    };
+  }
+  const root = String(res.stdout || "").trim();
+  if (!root) return { ok: false, error: "Not a git repo (no repo root returned)." };
+  return { ok: true, root: path.resolve(root) };
+}
+
+function repoSlug(repoRoot) {
+  const repoName = path.basename(repoRoot);
+  const repoHash = crypto.createHash("sha1").update(String(repoRoot)).digest("hex").slice(0, 8);
+  return `${repoName}-${repoHash}`;
+}
+
+async function gitWorktreeList(repoRoot) {
+  const res = await execFileCapture("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
+    cwd: repoRoot,
+    timeoutMs: 20000,
+  });
+  if (res.code !== 0) {
+    const detail = (res.stderr || res.stdout || "").trim();
+    return { ok: false, error: `git worktree list failed:\n\`\`\`\n${detail.slice(0, 1600)}\n\`\`\`` };
+  }
+  const lines = String(res.stdout || "").split(/\r?\n/);
+  const worktrees = [];
+  let cur = null;
+  const pushCur = () => {
+    if (!cur || !cur.path) return;
+    const name = path.basename(cur.path);
+    let branch = cur.branch || "";
+    if (branch.startsWith("refs/heads/")) branch = branch.slice("refs/heads/".length);
+    worktrees.push({ name, path: cur.path, branch, head: cur.head || "" });
+  };
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (line.startsWith("worktree ")) {
+      pushCur();
+      cur = { path: line.slice("worktree ".length).trim(), branch: "", head: "" };
+      continue;
+    }
+    if (!cur) continue;
+    if (line.startsWith("branch ")) cur.branch = line.slice("branch ".length).trim();
+    else if (line.startsWith("HEAD ")) cur.head = line.slice("HEAD ".length).trim();
+  }
+  pushCur();
+  return { ok: true, worktrees };
+}
+
+async function resolveWorktreePath(repoRoot, nameOrPath) {
+  const list = await gitWorktreeList(repoRoot);
+  if (!list.ok) return list;
+  const needle = String(nameOrPath || "").trim();
+  if (!needle) return { ok: false, error: "Missing worktree name." };
+  if (path.isAbsolute(needle)) {
+    const abs = path.resolve(needle);
+    const found = list.worktrees.find((wt) => path.resolve(wt.path) === abs);
+    if (found) return { ok: true, path: abs, branch: found.branch || "" };
+    return { ok: false, error: "Worktree path not found in `git worktree list`." };
+  }
+  const name = sanitizeWorktreeName(needle);
+  if (!name) return { ok: false, error: "Invalid worktree name." };
+  const found = list.worktrees.find((wt) => wt.name === name);
+  if (!found) return { ok: false, error: `No worktree named \`${name}\` found.` };
+  return { ok: true, path: path.resolve(found.path), branch: found.branch || "" };
+}
+
+async function gitWorktreeCreate(repoRoot, name, fromRef) {
+  const safeName = sanitizeWorktreeName(name);
+  if (!safeName) return { ok: false, error: "Invalid worktree name." };
+  const parent = path.join(CONFIG.worktreeRootDir, repoSlug(repoRoot));
+  const worktreePath = path.join(parent, safeName);
+  const branch = `wt/${safeName}`;
+
+  try {
+    await fsp.mkdir(parent, { recursive: true });
+  } catch (err) {
+    return { ok: false, error: `Failed creating worktree parent dir: ${String(err.message || err)}` };
+  }
+  try {
+    const st = await fsp.stat(worktreePath);
+    if (st && st.isDirectory()) {
+      return { ok: false, error: `Worktree already exists at: ${worktreePath}` };
+    }
+  } catch {}
+
+  const ref = String(fromRef || "HEAD").trim() || "HEAD";
+  const res = await execFileCapture(
+    "git",
+    ["-C", repoRoot, "worktree", "add", "-b", branch, worktreePath, ref],
+    { cwd: repoRoot, timeoutMs: 60000 }
+  );
+  if (res.code !== 0) {
+    const detail = (res.stderr || res.stdout || "").trim();
+    return { ok: false, error: `git worktree add failed:\n\`\`\`\n${detail.slice(0, 1600)}\n\`\`\`` };
+  }
+  logRelayEvent("worktree.created", { repoRoot, path: worktreePath, branch });
+  return { ok: true, path: path.resolve(worktreePath), branch };
+}
+
+async function gitWorktreeRemove(repoRoot, worktreePath, force) {
+  const args = ["-C", repoRoot, "worktree", "remove"];
+  if (force) args.push("--force");
+  args.push(worktreePath);
+  const res = await execFileCapture("git", args, { cwd: repoRoot, timeoutMs: 60000 });
+  if (res.code !== 0) {
+    const detail = (res.stderr || res.stdout || "").trim();
+    return { ok: false, error: `git worktree remove failed:\n\`\`\`\n${detail.slice(0, 1600)}\n\`\`\`` };
+  }
+  await execFileCapture("git", ["-C", repoRoot, "worktree", "prune"], { cwd: repoRoot, timeoutMs: 30000 });
+  logRelayEvent("worktree.removed", { repoRoot, path: worktreePath, force: Boolean(force) });
+  return { ok: true };
+}
+
+async function kickTaskRunner(conversationKey, channel, session, meta) {
+  const runner = taskRunnerByConversation.get(conversationKey);
+  if (!runner || !channel) return;
+
+  ensureTasksShape(session);
+  ensureTaskLoopShape(session);
+
+  const summarizeCounts = () => {
+    const counts = { pending: 0, running: 0, done: 0, failed: 0, blocked: 0, canceled: 0 };
+    for (const t of session.tasks || []) {
+      if (!t || typeof t !== "object") continue;
+      if (counts[t.status] != null) counts[t.status] += 1;
+    }
+    return counts;
+  };
+
+  try {
+    while (true) {
+      const r = taskRunnerByConversation.get(conversationKey);
+      const stopRequested = (r && r.stopRequested) || (session.taskLoop && session.taskLoop.stopRequested);
+      if (stopRequested) break;
+
+      const task = findNextPendingTask(session);
+      if (!task) break;
+
+      task.status = "running";
+      task.startedAt = nowIso();
+      task.finishedAt = null;
+      task.attempts = (Number(task.attempts || 0) || 0) + 1;
+      task.lastError = null;
+      ensureTaskLoopShape(session);
+      session.taskLoop.currentTaskId = task.id;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      logRelayEvent("task.started", { conversationKey, taskId: task.id, attempts: task.attempts });
+
+      const wrapper = [
+        `[TASK ${task.id}]`,
+        task.text,
+        "",
+        "When finished:",
+        "- briefly summarize outcome",
+        "- if blocked, write: [[task:blocked]] and explain what you need",
+        "- otherwise end with: [[task:done]]",
+      ].join("\n");
+
+      const res = await runAgentAndPostToDiscord({
+        baseMessage: null,
+        channel,
+        session,
+        conversationKey,
+        prompt: wrapper,
+        isDm: Boolean(meta && meta.isDm),
+        isThread: Boolean(meta && meta.isThread),
+        reasonLabel: `task ${task.id}`,
+        postFullOutput: CONFIG.tasksPostFullOutput,
+      });
+
+      const finishedAt = nowIso();
+      ensureTaskLoopShape(session);
+      session.taskLoop.currentTaskId = null;
+
+      if (res.ok) {
+        const parsed = parseTaskMarkers(res.text);
+        task.status = parsed.status;
+        task.finishedAt = finishedAt;
+        task.lastResultPreview = taskTextPreview(parsed.cleaned, 200) || null;
+        task.lastError = null;
+        logRelayEvent("task.finished", { conversationKey, taskId: task.id, status: task.status });
+        if (task.status === "blocked") break;
+      } else {
+        const stopNow =
+          (taskRunnerByConversation.get(conversationKey) || {}).stopRequested ||
+          (session.taskLoop && session.taskLoop.stopRequested);
+        task.status = stopNow ? "canceled" : "failed";
+        task.finishedAt = finishedAt;
+        task.lastError = res.error || "task failed";
+        task.lastResultPreview = null;
+        logRelayEvent("task.finished", { conversationKey, taskId: task.id, status: task.status });
+        if (CONFIG.tasksStopOnError) break;
+      }
+
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      // Yield so stop commands can take effect between tasks.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  } catch (err) {
+    logRelayEvent("task.runner.error", {
+      conversationKey,
+      error: String(err && err.message ? err.message : err).slice(0, 240),
+    });
+  } finally {
+    ensureTaskLoopShape(session);
+    session.taskLoop.running = false;
+    session.taskLoop.stopRequested = false;
+    session.taskLoop.currentTaskId = null;
+    session.updatedAt = nowIso();
+    await queueSaveState();
+    taskRunnerByConversation.delete(conversationKey);
+    const counts = summarizeCounts();
+    try {
+      await channel.send(
+        `Task runner stopped. pending=${counts.pending} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`
+      );
+    } catch {}
+  }
+}
+
 async function handleCommand(message, session, command, conversationKey) {
   if (command.name === "help") {
     await message.reply(
@@ -1242,6 +2045,8 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/upload <path>` - upload an image from this conversation's upload directory",
         "`/context` - show context bootstrap diagnostics for this conversation",
         "`/context reload` - force context re-bootstrap on next message",
+        "`/task <subcmd>` - manage per-conversation task queue (add/list/run/stop/clear)",
+        "`/worktree <subcmd>` - manage git worktrees (list/new/use/rm/prune)",
       ].join("\n")
     );
     return true;
@@ -1293,6 +2098,288 @@ async function handleCommand(message, session, command, conversationKey) {
       }
     }
     await sendLongReply(message, lines.join("\n"));
+    return true;
+  }
+
+  if (command.name === "task") {
+    if (!CONFIG.tasksEnabled) {
+      await message.reply("Tasks are disabled on this relay (RELAY_TASKS_ENABLED=false).");
+      return true;
+    }
+    ensureTasksShape(session);
+    ensureTaskLoopShape(session);
+
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = subRaw.toLowerCase();
+
+    if (sub === "add") {
+      if (!rest) {
+        await message.reply("Usage: `/task add <text...>`");
+        return true;
+      }
+      const pending = session.tasks.filter((t) => t && t.status === "pending").length;
+      if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+        await message.reply(`Task queue is full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
+        return true;
+      }
+      const task = createTask(session, rest);
+      session.tasks.push(task);
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      logRelayEvent("task.added", { conversationKey: conversationKey || null, taskId: task.id });
+      await message.reply(`Queued task \`${task.id}\`: ${taskTextPreview(task.text, 80)}`);
+      return true;
+    }
+
+    if (sub === "list" || !sub) {
+      const lines = [];
+      lines.push(
+        `task_loop: running=${Boolean(session.taskLoop && session.taskLoop.running)} stop_requested=${Boolean(
+          session.taskLoop && session.taskLoop.stopRequested
+        )} current=${(session.taskLoop && session.taskLoop.currentTaskId) || "none"}`
+      );
+      if (!session.tasks.length) {
+        lines.push("- (no tasks)");
+        await sendLongReply(message, lines.join("\n"));
+        return true;
+      }
+      const maxLines = 28;
+      const show = session.tasks.slice(0, maxLines);
+      for (const t of show) {
+        lines.push(`- ${t.id} [${t.status}] ${taskTextPreview(t.text, 80)}`);
+      }
+      if (session.tasks.length > show.length) {
+        lines.push(`- ... (${session.tasks.length - show.length} more)`);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    if (sub === "run") {
+      if (taskRunnerByConversation.has(conversationKey)) {
+        await message.reply("Task runner is already running for this conversation.");
+        return true;
+      }
+      const next = findNextPendingTask(session);
+      if (!next) {
+        await message.reply("No pending tasks.");
+        return true;
+      }
+      session.taskLoop.running = true;
+      session.taskLoop.stopRequested = false;
+      session.taskLoop.currentTaskId = null;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
+      await message.reply("Task runner started.");
+      void kickTaskRunner(conversationKey, message.channel, session, {
+        isDm: !message.guildId,
+        isThread: Boolean(message.channel && message.channel.isThread && message.channel.isThread()),
+      });
+      return true;
+    }
+
+    if (sub === "stop") {
+      requestStopConversation(conversationKey, session);
+      await message.reply("Stop requested.");
+      return true;
+    }
+
+    if (sub === "clear") {
+      const mode = (rest || "done").toLowerCase();
+      if (mode !== "done" && mode !== "all") {
+        await message.reply("Usage: `/task clear [done|all]`");
+        return true;
+      }
+      const before = session.tasks.length;
+      if (mode === "all") {
+        session.tasks = [];
+      } else {
+        session.tasks = session.tasks.filter((t) => !(t && typeof t === "object" && t.status === "done"));
+      }
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await message.reply(`Cleared ${before - session.tasks.length} task(s).`);
+      return true;
+    }
+
+    await message.reply("Usage: `/task add|list|run|stop|clear`");
+    return true;
+  }
+
+  if (command.name === "worktree") {
+    if (CONFIG.worktreeRootDirError) {
+      await message.reply(`Worktrees disabled: ${CONFIG.worktreeRootDirError}`);
+      return true;
+    }
+    if (session.taskLoop && session.taskLoop.running) {
+      await message.reply("Refusing while task runner is active. Run `/task stop` first.");
+      return true;
+    }
+
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = subRaw.toLowerCase();
+    if (!sub || sub === "list") {
+      const repo = await resolveGitRepoRoot(session.workdir || CONFIG.defaultWorkdir);
+      if (!repo.ok) {
+        await message.reply(repo.error);
+        return true;
+      }
+      const listed = await gitWorktreeList(repo.root);
+      if (!listed.ok) {
+        await message.reply(listed.error);
+        return true;
+      }
+      const lines = [];
+      lines.push(`repo_root: ${repo.root}`);
+      if (listed.worktrees.length === 0) {
+        lines.push("- (no worktrees?)");
+      } else {
+        for (const wt of listed.worktrees.slice(0, 30)) {
+          lines.push(`- ${wt.name} ${wt.branch ? `[${wt.branch}]` : ""} -> ${wt.path}`);
+        }
+        if (listed.worktrees.length > 30) lines.push(`- ... (${listed.worktrees.length - 30} more)`);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    if (sub === "prune") {
+      const repo = await resolveGitRepoRoot(session.workdir || CONFIG.defaultWorkdir);
+      if (!repo.ok) {
+        await message.reply(repo.error);
+        return true;
+      }
+      const res = await execFileCapture("git", ["-C", repo.root, "worktree", "prune"], { cwd: repo.root });
+      if (res.code !== 0) {
+        await message.reply(`git worktree prune failed:\n\`\`\`\n${(res.stderr || res.stdout || "").slice(0, 1600)}\n\`\`\``);
+        return true;
+      }
+      await message.reply("Pruned worktrees.");
+      return true;
+    }
+
+    if (sub === "new") {
+      const args = (rest || "").split(/\s+/).filter(Boolean);
+      const nameRaw = args[0] || "";
+      if (!nameRaw) {
+        await message.reply("Usage: `/worktree new <name> [--from <ref>] [--use]`");
+        return true;
+      }
+      const parsed = parseWorktreeNewArgs(args.slice(1));
+      if (!parsed.ok) {
+        await message.reply(parsed.error);
+        return true;
+      }
+      const name = sanitizeWorktreeName(nameRaw);
+      if (!name) {
+        await message.reply("Invalid worktree name. Allowed: letters, numbers, '.', '_', '-' (no slashes).");
+        return true;
+      }
+      const repo = await resolveGitRepoRoot(session.workdir || CONFIG.defaultWorkdir);
+      if (!repo.ok) {
+        await message.reply(repo.error);
+        return true;
+      }
+
+      const wt = await gitWorktreeCreate(repo.root, name, parsed.fromRef);
+      if (!wt.ok) {
+        await message.reply(wt.error);
+        return true;
+      }
+      if (parsed.use) {
+        if (!isAllowedWorkdir(wt.path)) {
+          await message.reply(`Created worktree is outside allowed roots: ${wt.path}`);
+          return true;
+        }
+        session.workdir = wt.path;
+        session.threadId = null;
+        session.contextVersion = 0;
+        session.updatedAt = nowIso();
+        await queueSaveState();
+      }
+      await message.reply(
+        parsed.use
+          ? `Worktree created and selected: \`${wt.path}\` (branch \`${wt.branch}\`)`
+          : `Worktree created: \`${wt.path}\` (branch \`${wt.branch}\`)`
+      );
+      return true;
+    }
+
+    if (sub === "use") {
+      const nameRaw = (rest || "").split(/\s+/)[0] || "";
+      if (!nameRaw) {
+        await message.reply("Usage: `/worktree use <name>`");
+        return true;
+      }
+      const name = sanitizeWorktreeName(nameRaw) || (path.isAbsolute(nameRaw) ? nameRaw : "");
+      if (!name) {
+        await message.reply("Invalid worktree name/path.");
+        return true;
+      }
+      const repo = await resolveGitRepoRoot(session.workdir || CONFIG.defaultWorkdir);
+      if (!repo.ok) {
+        await message.reply(repo.error);
+        return true;
+      }
+      const resolved = await resolveWorktreePath(repo.root, nameRaw);
+      if (!resolved.ok) {
+        await message.reply(resolved.error);
+        return true;
+      }
+      if (!isAllowedWorkdir(resolved.path)) {
+        await message.reply(`Workdir not allowed. Allowed roots: ${CONFIG.allowedWorkdirRoots.join(", ")}`);
+        return true;
+      }
+      session.workdir = resolved.path;
+      session.threadId = null;
+      session.contextVersion = 0;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await message.reply(`Workdir set to \`${resolved.path}\`. Session reset.`);
+      return true;
+    }
+
+    if (sub === "rm") {
+      const tokens = (rest || "").split(/\s+/).filter(Boolean);
+      const nameRaw = tokens[0] || "";
+      const force = tokens.includes("--force");
+      if (!nameRaw) {
+        await message.reply("Usage: `/worktree rm <name> [--force]`");
+        return true;
+      }
+      const repo = await resolveGitRepoRoot(session.workdir || CONFIG.defaultWorkdir);
+      if (!repo.ok) {
+        await message.reply(repo.error);
+        return true;
+      }
+      const resolved = await resolveWorktreePath(repo.root, nameRaw);
+      if (!resolved.ok) {
+        await message.reply(resolved.error);
+        return true;
+      }
+      if (!force && path.resolve(resolved.path) === path.resolve(session.workdir || "")) {
+        await message.reply("Refusing to remove the active workdir. Use `--force` if you really want this.");
+        return true;
+      }
+      const removed = await gitWorktreeRemove(repo.root, resolved.path, force);
+      if (!removed.ok) {
+        await message.reply(removed.error);
+        return true;
+      }
+      if (path.resolve(resolved.path) === path.resolve(session.workdir || "")) {
+        session.workdir = repo.root;
+        session.threadId = null;
+        session.contextVersion = 0;
+        session.updatedAt = nowIso();
+        await queueSaveState();
+      }
+      await message.reply(`Removed worktree: \`${resolved.path}\``);
+      return true;
+    }
+
+    await message.reply("Usage: `/worktree list|new|use|rm|prune`");
     return true;
   }
 
@@ -1452,175 +2539,30 @@ async function main() {
 
       const command = parseCommand(prompt);
       if (command) {
+        // `/task stop` must be responsive; handle it outside the per-conversation queue so
+        // it can kill an in-flight child process immediately.
+        if (command.name === "task") {
+          const { head: subRaw } = splitFirstToken(command.arg);
+          if (subRaw && subRaw.toLowerCase() === "stop") {
+            requestStopConversation(key, session);
+            await message.reply("Stop requested.");
+            return;
+          }
+        }
         await enqueueConversation(key, async () => handleCommand(message, session, command, key));
         return;
       }
 
-      const pendingMsg = await message.reply(`Running ${AGENT_LABEL}...`);
-      const wasAlreadyQueued = queueByConversation.has(key);
-      const progress = createProgressReporter(pendingMsg, key);
-      if (wasAlreadyQueued) {
-        progress.note("Waiting for an earlier request in this conversation");
-      }
-      logRelayEvent("message.queued", {
+      await runAgentAndPostToDiscord({
+        baseMessage: message,
+        channel: message.channel,
+        session,
         conversationKey: key,
-        provider: CONFIG.agentProvider,
-        promptChars: prompt.length,
-        sessionId: session.threadId || null,
-      });
-      await enqueueConversation(key, async () => {
-        const startedAt = Date.now();
-        try {
-          progress.note(`Starting ${AGENT_LABEL} run`);
-          void message.channel
-            .sendTyping()
-            .catch((err) =>
-              logRelayEvent("discord.sendTyping.error", {
-                conversationKey: key,
-                error: String(err && err.message ? err.message : err).slice(0, 240),
-              })
-            );
-          const uploadDir = getConversationUploadDir(key);
-          if (CONFIG.uploadEnabled) {
-            await fsp.mkdir(uploadDir, { recursive: true });
-          }
-          logRelayEvent("agent.run.start", {
-            conversationKey: key,
-            provider: CONFIG.agentProvider,
-            sessionId: session.threadId || null,
-            workdir: session.workdir || CONFIG.defaultWorkdir,
-          });
-          let contextInjected = false;
-          let result;
-          try {
-            const firstPrompt = await buildAgentPrompt(session, prompt, {
-              conversationKey: key,
-              uploadDir,
-              isDm,
-              isThread,
-            });
-            contextInjected = firstPrompt.contextInjected;
-            if (firstPrompt.contextInjected) {
-              const injectedChars =
-                firstPrompt.contextMeta && typeof firstPrompt.contextMeta.injectedChars === "number"
-                  ? firstPrompt.contextMeta.injectedChars
-                  : 0;
-              const includedFiles =
-                firstPrompt.contextMeta && typeof firstPrompt.contextMeta.includedFiles === "number"
-                  ? firstPrompt.contextMeta.includedFiles
-                  : 0;
-              logRelayEvent("agent.run.context_injected", {
-                conversationKey: key,
-                provider: CONFIG.agentProvider,
-                sessionId: session.threadId || null,
-                contextVersion: CONFIG.contextVersion,
-                contextChars: injectedChars,
-                contextFiles: includedFiles,
-              });
-              progress.note(
-                includedFiles > 0
-                  ? `Loaded relay runtime context (+${includedFiles} context file${includedFiles === 1 ? "" : "s"})`
-                  : "Loaded relay runtime context"
-              );
-            }
-            result = await runAgent(
-              session,
-              firstPrompt.prompt,
-              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
-              (line) => progress.note(line)
-            );
-          } catch (runErr) {
-            if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
-            const staleThreadId = session.threadId;
-            session.threadId = null;
-            session.updatedAt = new Date().toISOString();
-            await queueSaveState();
-            logRelayEvent("agent.run.retry_stale_session", {
-              conversationKey: key,
-              provider: CONFIG.agentProvider,
-              staleSessionId: staleThreadId,
-            });
-            progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
-            const retryPrompt = await buildAgentPrompt(session, prompt, {
-              conversationKey: key,
-              uploadDir,
-              isDm,
-              isThread,
-            });
-            contextInjected = contextInjected || retryPrompt.contextInjected;
-            result = await runAgent(
-              session,
-              retryPrompt.prompt,
-              CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
-              (line) => progress.note(line)
-            );
-            result.text =
-              `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
-              (result.text || "");
-          }
-          session.threadId = result.threadId || session.threadId;
-          if (contextInjected) session.contextVersion = CONFIG.contextVersion;
-          session.updatedAt = new Date().toISOString();
-          await queueSaveState();
-          logRelayEvent("agent.run.done", {
-            conversationKey: key,
-            provider: CONFIG.agentProvider,
-            durationMs: Date.now() - startedAt,
-            sessionId: session.threadId || null,
-            resultChars: (result.text || "").length,
-          });
-
-          let answer = result.text || "No response.";
-          let uploadPaths = [];
-          if (CONFIG.uploadEnabled) {
-            const parsed = extractUploadMarkers(answer);
-            answer = parsed.text;
-            uploadPaths = parsed.rawPaths || [];
-          }
-
-          await progress.stop();
-          const chunks = splitMessage(answer, Math.max(300, CONFIG.maxReplyChars));
-          await pendingMsg.edit(chunks[0]);
-          for (let i = 1; i < chunks.length; i += 1) {
-            await message.channel.send(chunks[i]);
-          }
-
-          if (CONFIG.uploadEnabled && uploadPaths.length > 0) {
-            const { files, errors } = await resolveAndValidateUploads(key, uploadPaths);
-            if (files.length > 0) {
-              for (let i = 0; i < files.length; i += 10) {
-                const batch = files.slice(i, i + 10);
-                const names = batch.map((f) => `\`${f.name}\``).join(", ");
-                await message.channel.send({ content: `Uploaded: ${names}`, files: batch });
-              }
-            }
-            if (errors.length > 0) {
-              await message.channel.send(`Upload notes:\n${errors.map((e) => `- ${e}`).join("\n")}`);
-            }
-          }
-        } catch (err) {
-          await progress.stop();
-          const detail = String(err.message || err).slice(0, 1800);
-          logRelayEvent("message.failed", {
-            conversationKey: key,
-            provider: CONFIG.agentProvider,
-            durationMs: Date.now() - startedAt,
-            sessionId: session.threadId || null,
-            error: detail.slice(0, 240),
-          });
-          const errorBody = `${AGENT_LABEL} error:\n\`\`\`\n${detail}\n\`\`\``;
-          try {
-            await pendingMsg.edit(errorBody);
-          } catch (editErr) {
-            logRelayEvent("message.error_edit_failed", {
-              conversationKey: key,
-              error: String(editErr && editErr.message ? editErr.message : editErr).slice(0, 240),
-            });
-            try {
-              await sendLongReply(message, errorBody);
-            } catch {}
-          }
-        }
+        prompt,
+        isDm,
+        isThread,
+        reasonLabel: "user message",
+        postFullOutput: true,
       });
     } catch (err) {
       try {

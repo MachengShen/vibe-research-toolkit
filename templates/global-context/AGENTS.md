@@ -26,6 +26,9 @@ For any project with active experiments or ongoing work:
 - Memory artifact roles:
   - `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`) is append-only chronological history.
   - `docs/WORKING_MEMORY.md` is a living snapshot and may be compacted or rewritten.
+- If you create a git commit in the project repo, record it in both files:
+  - append commit hash + subject + affected scope to `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`)
+  - update `docs/WORKING_MEMORY.md` with the latest commit reference and its current significance
 - Append-only rules apply to handoff logs, not to working-memory snapshot files.
 
 If a project already has its own `AGENTS.md`, keep those instructions and include this work-log policy.

@@ -221,6 +221,7 @@ Commands:
 Notes:
 
 - The relay appends to the files itself; Codex is used only to *generate* the text in read-only mode.
+- If `RELAY_AUTO_HANDOFF_AFTER_EACH_TASK=true`, a handoff is written after each completed task in `/task run`.
 - If `RELAY_AUTO_HANDOFF_AFTER_TASK_RUN=true`, a handoff is written automatically after `/task run` completes.
 - If `RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY=true`, a handoff is written automatically after `/plan apply` completes.
 - `RELAY_HANDOFF_AUTO_ENABLED` is a legacy alias for enabling both auto-handoff behaviors above.
@@ -230,6 +231,7 @@ Env knobs:
 - `RELAY_HANDOFF_ENABLED=true|false`
 - `RELAY_HANDOFF_FILES="HANDOFF_LOG.md;docs/WORKING_MEMORY.md"` (semicolon-separated)
 - `RELAY_HANDOFF_AUTO_ENABLED=true|false` (legacy; default `false`)
+- `RELAY_AUTO_HANDOFF_AFTER_EACH_TASK=true|false` (default `false`)
 - `RELAY_AUTO_HANDOFF_AFTER_TASK_RUN=true|false` (default `false`)
 - `RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY=true|false` (default `false`)
 - `RELAY_HANDOFF_GIT_AUTO_COMMIT=true|false` (default `false`)

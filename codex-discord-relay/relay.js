@@ -270,6 +270,7 @@ const CONFIG = {
     }
     return boolEnv("RELAY_HANDOFF_AUTO_ENABLED", false);
   })(),
+  handoffAutoAfterEachTask: boolEnv("RELAY_AUTO_HANDOFF_AFTER_EACH_TASK", false),
   handoffAutoAfterPlanApply: (() => {
     if (process.env.RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY != null) {
       return boolEnv("RELAY_AUTO_HANDOFF_AFTER_PLAN_APPLY", false);
@@ -3681,6 +3682,7 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
       const finishedAt = nowIso();
       ensureTaskLoopShape(session);
       session.taskLoop.currentTaskId = null;
+      let shouldBreakAfterTask = false;
 
       if (res.ok) {
         const parsed = parseTaskMarkers(res.text);
@@ -3710,7 +3712,7 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
             });
           }
         }
-        if (task.status === "blocked") break;
+        if (task.status === "blocked") shouldBreakAfterTask = true;
       } else {
         const stopNow =
           (taskRunnerByConversation.get(conversationKey) || {}).stopRequested ||
@@ -3720,11 +3722,23 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
         task.lastError = stopNow ? "stop requested" : res.error || "task failed";
         task.lastResultPreview = null;
         logRelayEvent("task.finished", { conversationKey, taskId: task.id, status: task.status });
-        if (CONFIG.tasksStopOnError) break;
+        if (CONFIG.tasksStopOnError) shouldBreakAfterTask = true;
       }
 
       session.updatedAt = nowIso();
       await queueSaveState();
+
+      if (CONFIG.handoffAutoAfterEachTask) {
+        await runAutoHandoff({
+          session,
+          conversationKey,
+          workdir: session.workdir || CONFIG.defaultWorkdir,
+          channel,
+          reason: `task ${task.id} (${task.status})`,
+        });
+      }
+
+      if (shouldBreakAfterTask) break;
 
       // Yield so stop commands can take effect between tasks.
       await new Promise((r) => setTimeout(r, 0));
@@ -3752,28 +3766,13 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
     } catch {}
 
     if (CONFIG.handoffAutoAfterTaskRun) {
-      try {
-        const workdir = session.workdir || CONFIG.defaultWorkdir;
-        const res = await enqueueConversation(conversationKey, async () =>
-          writeHandoffEntry({
-            session,
-            conversationKey,
-            workdir,
-            dryRun: false,
-            doCommit: CONFIG.handoffGitAutoCommit,
-            doPush: CONFIG.handoffGitAutoPush,
-          })
-        );
-        if (res && res.ok) {
-          const note = res.commitSummary ? ` (${res.commitSummary})` : "";
-          await channel.send(`Auto-handoff written to ${res.files.map((p) => `\`${p}\``).join(", ")}${note}`);
-        }
-      } catch (err) {
-        logRelayEvent("handoff.auto.error", {
-          conversationKey,
-          error: String(err && err.message ? err.message : err).slice(0, 240),
-        });
-      }
+      await runAutoHandoff({
+        session,
+        conversationKey,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
+        channel,
+        reason: "task runner stop",
+      });
     }
   }
 }
@@ -3904,6 +3903,36 @@ async function writeHandoffEntry({ session, conversationKey, workdir, dryRun, do
   return { ok: true, files: ensured, entryText, commitSummary };
 }
 
+async function runAutoHandoff({ session, conversationKey, workdir, channel, reason }) {
+  try {
+    const res = await enqueueConversation(conversationKey, async () =>
+      writeHandoffEntry({
+        session,
+        conversationKey,
+        workdir,
+        dryRun: false,
+        doCommit: CONFIG.handoffGitAutoCommit,
+        doPush: CONFIG.handoffGitAutoPush,
+      })
+    );
+    if (res && res.ok && channel) {
+      const note = res.commitSummary ? ` (${res.commitSummary})` : "";
+      const reasonSuffix = reason ? ` after ${reason}` : "";
+      await channel.send(
+        `Auto-handoff written${reasonSuffix} to ${res.files.map((p) => `\`${p}\``).join(", ")}${note}`
+      );
+    }
+    return res;
+  } catch (err) {
+    logRelayEvent("handoff.auto.error", {
+      conversationKey,
+      reason: reason || null,
+      error: String(err && err.message ? err.message : err).slice(0, 240),
+    });
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+}
+
 async function startPlanApplyFlow({ conversationKey, message, session, plan, planText }) {
   const channel = message && message.channel ? message.channel : null;
   if (!channel) return;
@@ -3973,27 +4002,13 @@ async function startPlanApplyFlow({ conversationKey, message, session, plan, pla
     }
 
     if (CONFIG.handoffAutoAfterPlanApply) {
-      try {
-        const handoffRes = await enqueueConversation(conversationKey, async () =>
-          writeHandoffEntry({
-            session,
-            conversationKey,
-            workdir,
-            dryRun: false,
-            doCommit: CONFIG.handoffGitAutoCommit,
-            doPush: CONFIG.handoffGitAutoPush,
-          })
-        );
-        if (handoffRes && handoffRes.ok) {
-          const note = handoffRes.commitSummary ? ` (${handoffRes.commitSummary})` : "";
-          await channel.send(`Auto-handoff written to ${handoffRes.files.map((p) => `\`${p}\``).join(", ")}${note}`);
-        }
-      } catch (err) {
-        logRelayEvent("handoff.auto.error", {
-          conversationKey,
-          error: String(err && err.message ? err.message : err).slice(0, 240),
-        });
-      }
+      await runAutoHandoff({
+        session,
+        conversationKey,
+        workdir,
+        channel,
+        reason: `plan ${plan && plan.id ? plan.id : "unknown"} apply`,
+      });
     }
   }
 }

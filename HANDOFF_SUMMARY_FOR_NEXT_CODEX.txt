@@ -609,3 +609,24 @@ verified:
 next_steps:
 - Deploy updated relay to /root/codex-discord-relay and restart instances
 - Manually test in Discord: /worktree rm on active workdir; /plan new/show/apply; /task stop responsiveness
+
+[2026-02-18T22:12:17+08:00] owner=codex objective=Implement agent-triggered relay actions for auto job start/watch
+- Implemented [[relay-actions]]...[[/relay-actions]] JSON extraction + execution (stripped from visible reply).
+- Added safety gating (default off): RELAY_AGENT_ACTIONS_ENABLED, RELAY_AGENT_ACTIONS_DM_ONLY, RELAY_AGENT_ACTIONS_ALLOWED, RELAY_AGENT_ACTIONS_MAX_PER_MESSAGE; per-conversation toggle /auto actions on|off.
+- Implemented relay-side jobs + watchers (persist under $RELAY_STATE_DIR/jobs/<conversationKeySlug>/<jobId>/) with restart restoration via lastChannelId in session state.
+- Updated docs/env templates accordingly.
+- Commit: bb5ea06 relay: agent actions for job start/watch
+- Verification: node --check codex-discord-relay/relay.js (toolkit + live) OK.
+
+[2026-02-19T14:35:47+0800] owner: codex
+objective: implement per-task handoff appends for /task runner
+action: major update
+what_changed:
+- relay.js: added RELAY_AUTO_HANDOFF_AFTER_EACH_TASK and per-task auto-handoff execution path
+- README/.env examples/setup env/install script updated with new env knob
+- live deployment updated and restarted; env set true on default+claude instances
+run_paths: /root/openclaw-codex-discord-skills-kit/codex-discord-relay/relay.js ; /root/openclaw-codex-discord-skills-kit/codex-discord-relay/README.md ; /root/openclaw-codex-discord-skills-kit/config/setup.env.example ; /root/openclaw-codex-discord-skills-kit/scripts/install_codex_discord_relay.sh
+log_paths: /root/.codex-discord-relay/relay.log ; /root/.codex-discord-relay/instances/claude/relay.log
+current_run_state: default+claude relay instances running after deploy
+training_status: inactive (epoch N/A, metrics N/A)
+---

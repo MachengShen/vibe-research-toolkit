@@ -156,6 +156,22 @@ Env knobs:
 - `RELAY_JOBS_AUTO_WATCH_EVERY_SEC=<int>` (default `300`)
 - `RELAY_JOBS_AUTO_WATCH_TAIL_LINES=<int>` (default `50`)
 
+### Recommended Long-Run Callback Flow
+
+Use this when you want the agent to launch training, keep running in background, and automatically analyze results when complete.
+
+1. Set repo workdir:
+   - `/workdir /root/<repo>`
+2. Queue a task with explicit skill invocation:
+   - `/task add Use skill relay-long-task-callback. Launch <training command>. Watch everySec=120 tailLines=80. thenTask="Analyze final log <path> and summarize metrics + next steps."`
+3. Start runner:
+   - `/task run`
+
+Notes:
+- `/task add` is recommended for queue controls (`/task list`, `/task stop`) and repeatability.
+- You can also use plain natural-language prompting (without `/task`) if the agent emits valid `[[relay-actions]]` JSON.
+- `/auto actions on` is usually not needed if global actions are enabled and this conversation has not toggled actions off.
+
 ## Task Queue (Ralph Loop)
 
 Commands:

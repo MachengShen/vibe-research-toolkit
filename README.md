@@ -156,6 +156,7 @@ This repo bundles reusable local skills under:
 - `packaged-skills/codex/discord-image-upload`
 - `packaged-skills/codex/openclaw-media-send`
 - `packaged-skills/codex/periodic-mechanistic-service`
+- `packaged-skills/codex/relay-long-task-callback`
 - `packaged-skills/codex/system-setup-context-awareness`
 - `packaged-skills/codex/ml-run-monitor-decider`
 - `packaged-skills/codex/experiment-working-memory-handoff`
@@ -254,6 +255,21 @@ Common signals:
 - `ETIMEDOUT ...:443` -> proxy/network path issue (check `/root/.openclaw/proxy.env`).
 - `Cannot find module 'node:fs'` or `node:fs/promises` -> old Node runtime was used.
 - `Working...` message stops updating while a `codex exec` process is still alive -> queue is blocked by a hung run; restart relay from SSH.
+
+## Long-Run Training Callback Workflow
+
+Use this for "start now, analyze later" training jobs from Discord.
+
+1. Set workdir in the thread:
+   - `/workdir /root/<repo>`
+2. Add one task that explicitly invokes the packaged skill:
+   - `/task add Use skill relay-long-task-callback. Launch <training command>. Watch everySec=120 tailLines=80. thenTask="Analyze final log <path> and summarize metrics + next steps."`
+3. Start task runner:
+   - `/task run`
+
+Notes:
+- `/task add` is recommended for queue control (`/task list`, `/task stop`), but plain natural-language prompting can also work if the agent emits valid `[[relay-actions]]` JSON.
+- `/auto actions on` is usually unnecessary if global relay actions are already enabled and this conversation did not disable them.
 
 ## Notes
 

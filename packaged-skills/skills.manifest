@@ -4,5 +4,6 @@ codex/delegate-coding-tasks
 codex/discord-image-upload
 codex/openclaw-media-send
 codex/periodic-mechanistic-service
+codex/relay-long-task-callback
 codex/system-setup-context-awareness
 codex/tavily-search

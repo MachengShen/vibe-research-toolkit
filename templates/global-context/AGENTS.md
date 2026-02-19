@@ -16,13 +16,17 @@ Both agents share the same filesystem at `/root`. Skills live in:
 ## Global Work Log Policy
 For any project with active experiments or ongoing work:
 - Read `<project-root>/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` (or `HANDOFF_LOG.md`) at task start.
+- If present, read `<project-root>/docs/WORKING_MEMORY.md` for the latest current-state snapshot.
 - Read `/root/SYSTEM_SETUP_WORKING_MEMORY.md` for machine-level infrastructure context.
 - Append timestamped updates at minimum:
   - at task start (timestamp, owner, objective)
   - after major actions (job launch/stop, code changes, failures)
   - at task end (what changed, current run state, next steps)
 - Always include: absolute timestamp with timezone, exact run/log paths, latest known epoch and key metrics when training is active.
-- Append-only: never delete or rewrite prior entries.
+- Memory artifact roles:
+  - `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`) is append-only chronological history.
+  - `docs/WORKING_MEMORY.md` is a living snapshot and may be compacted or rewritten.
+- Append-only rules apply to handoff logs, not to working-memory snapshot files.
 
 If a project already has its own `AGENTS.md`, keep those instructions and include this work-log policy.
 

@@ -1,5 +1,5 @@
 # currentDate
-Today's date is 2026-02-17.
+Today's date is 2026-02-19.
 
       IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
 
@@ -22,9 +22,12 @@ Both agents share the same filesystem at `/root`. Skills live in:
 ## Global Work Log Policy
 For any project with active experiments or ongoing work:
 - Read `<project-root>/HANDOFF_LOG.md` or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` at task start.
+- If present, read `<project-root>/docs/WORKING_MEMORY.md` for the latest current-state snapshot.
 - Read `/root/SYSTEM_SETUP_WORKING_MEMORY.md` for machine-level infrastructure context.
-- Append timestamped updates after major actions and at task end.
-- Never overwrite prior entries — append only.
+- Update memory artifacts after major actions and at task end:
+  - `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`) is append-only chronological history.
+  - `docs/WORKING_MEMORY.md` is a living snapshot and may be compacted or rewritten.
+- Append-only rules apply to handoff logs, not to working-memory snapshot files.
 
 ## Relay Infrastructure
 - Agent is accessed via `codex-discord-relay` — a Discord bot that proxies messages to agent CLI sessions.

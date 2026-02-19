@@ -373,7 +373,6 @@ function isAllowedWorkdir(workdir) {
   return CONFIG.allowedWorkdirRoots.some((root) => isSubPath(root, workdir));
 }
 
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const TEXT_EXTS = new Set([
   ".txt",
   ".md",
@@ -439,11 +438,6 @@ function isAllowedUploadPath(resolvedPath, conversationUploadDir) {
     return CONFIG.uploadAllowedRoots.some((root) => isSubPath(root, resolvedPath));
   }
   return isSubPath(conversationUploadDir, resolvedPath);
-}
-
-function isImagePath(filePath) {
-  const ext = path.extname(String(filePath || "")).toLowerCase();
-  return IMAGE_EXTS.has(ext);
 }
 
 function extractUploadMarkers(text) {
@@ -657,11 +651,6 @@ async function resolveAndValidateUploads(conversationKey, rawPaths) {
       errors.push(`Upload blocked (path not allowed): \`${path.basename(resolved)}\``);
       continue;
     }
-    if (!isImagePath(resolved)) {
-      errors.push(`Upload blocked (not an image type): \`${path.basename(resolved)}\``);
-      continue;
-    }
-
     let st;
     try {
       st = await fsp.stat(resolved);
@@ -1854,7 +1843,8 @@ function buildRelayRuntimeContext(meta) {
     lines.push(
       "- File attachment bridge is enabled.",
       `- Preferred upload base dir: ${uploadDir}`,
-      "- To attach an image file, include markers like [[upload:relative/or/absolute/path]] in your final response.",
+      "- To attach a local file, include markers like [[upload:relative/or/absolute/path]] in your final response.",
+      "- Images are shown inline by Discord when supported; non-image files are sent as downloadable attachments.",
       "- Do not claim uploads are unsupported unless an actual error occurred."
     );
   } else {
@@ -2109,9 +2099,14 @@ function buildClaudeArgs(session, prompt) {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (CONFIG.claudeModel) args.push("--model", CONFIG.claudeModel);
   if (CONFIG.claudePermissionMode) args.push("--permission-mode", CONFIG.claudePermissionMode);
-  if (CONFIG.claudeAllowedTools.length) args.push("--allowedTools", ...CONFIG.claudeAllowedTools);
+  // Claude CLI parses `--allowedTools <tools...>` as variadic; pass a single comma-separated
+  // argument so the trailing prompt is not swallowed as another tool token.
+  if (CONFIG.claudeAllowedTools.length) args.push("--allowedTools", CONFIG.claudeAllowedTools.join(","));
   if (session.threadId) args.push("--resume", session.threadId);
-  args.push(prompt);
+  // Always terminate option parsing explicitly before prompt text.
+  // Without `--`, some Claude CLI versions can still swallow the prompt when
+  // variadic options are present.
+  args.push("--", prompt);
   return args;
 }
 
@@ -4857,7 +4852,7 @@ async function handleCommand(message, session, command, conversationKey) {
     const { conversationDir, files, errors } = await resolveAndValidateUploads(key, [command.arg]);
     if (files.length === 0) {
       const detail = errors.length > 0 ? `\n${errors.map((e) => `- ${e}`).join("\n")}` : "";
-      await message.reply(`No valid image to upload.\nupload_dir: \`${conversationDir}\`${detail}`);
+      await message.reply(`No valid file to upload.\nupload_dir: \`${conversationDir}\`${detail}`);
       return true;
     }
 

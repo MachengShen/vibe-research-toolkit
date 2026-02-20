@@ -181,6 +181,24 @@ const RELAY_WORKTREE_ROOT_DIR_ERROR = (() => {
   return "";
 })();
 
+const RAW_RELAY_RESEARCH_PROJECTS_ROOT = (process.env.RELAY_RESEARCH_PROJECTS_ROOT || "").trim();
+const RELAY_RESEARCH_PROJECTS_ROOT = path.resolve(
+  RAW_RELAY_RESEARCH_PROJECTS_ROOT || path.join(RELAY_STATE_DIR, "projects")
+);
+const RELAY_RESEARCH_PROJECTS_ROOT_ERROR = (() => {
+  if (RAW_RELAY_RESEARCH_PROJECTS_ROOT && !path.isAbsolute(RAW_RELAY_RESEARCH_PROJECTS_ROOT)) {
+    return "RELAY_RESEARCH_PROJECTS_ROOT must be an absolute path";
+  }
+  const allowed = CODEX_ALLOWED_WORKDIR_ROOTS.some((root) => {
+    const relative = path.relative(root, RELAY_RESEARCH_PROJECTS_ROOT);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+  if (!allowed) {
+    return `RELAY_RESEARCH_PROJECTS_ROOT is outside CODEX_ALLOWED_WORKDIR_ROOTS (${CODEX_ALLOWED_WORKDIR_ROOTS.join(", ")})`;
+  }
+  return "";
+})();
+
 const CONFIG = {
   token: (process.env.DISCORD_BOT_TOKEN || "").trim(),
   agentProvider: normalizeAgentProvider(process.env.RELAY_AGENT_PROVIDER || process.env.AGENT_PROVIDER),
@@ -257,6 +275,25 @@ const CONFIG = {
 
   worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
   worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
+
+  researchEnabled: boolEnv("RELAY_RESEARCH_ENABLED", false),
+  researchDmOnly: boolEnv("RELAY_RESEARCH_DM_ONLY", true),
+  researchProjectsRoot: RELAY_RESEARCH_PROJECTS_ROOT,
+  researchProjectsRootError: RELAY_RESEARCH_PROJECTS_ROOT_ERROR,
+  researchDefaultMaxSteps: Math.max(1, intEnv("RELAY_RESEARCH_DEFAULT_MAX_STEPS", 50)),
+  researchDefaultMaxWallclockMin: Math.max(1, intEnv("RELAY_RESEARCH_DEFAULT_MAX_WALLCLOCK_MIN", 480)),
+  researchDefaultMaxRuns: Math.max(1, intEnv("RELAY_RESEARCH_DEFAULT_MAX_RUNS", 30)),
+  researchTickSec: Math.max(5, intEnv("RELAY_RESEARCH_TICK_SEC", 30)),
+  researchActionsAllowed: (() => {
+    const raw = String(process.env.RELAY_RESEARCH_ACTIONS_ALLOWED || "").trim();
+    const list = raw
+      ? parseToolList(raw)
+      : ["job_start", "job_watch", "job_stop", "task_add", "task_run", "write_report", "research_pause", "research_mark_done"];
+    return new Set(list.map((s) => String(s || "").trim().toLowerCase()).filter(Boolean));
+  })(),
+  researchMaxActionsPerStep: Math.max(1, intEnv("RELAY_RESEARCH_MAX_ACTIONS_PER_STEP", 12)),
+  researchRequireNotePrefix: boolEnv("RELAY_RESEARCH_REQUIRE_NOTE_PREFIX", false),
+  researchLeaseTtlSec: Math.max(15, intEnv("RELAY_RESEARCH_LEASE_TTL_SEC", 300)),
 
   plansEnabled: boolEnv("RELAY_PLANS_ENABLED", true),
   plansMaxHistory: Math.max(1, intEnv("RELAY_PLANS_MAX_HISTORY", 20)),
@@ -362,6 +399,7 @@ const queueByConversation = new Map();
 const activeChildByConversation = new Map();
 const taskRunnerByConversation = new Map();
 const jobWatchersByKey = new Map();
+const researchStepByConversation = new Set();
 let DISCORD_CLIENT = null;
 
 function isSubPath(parentDir, childDir) {
@@ -629,7 +667,18 @@ function extractRelayActions(text, { maxActions = 1 } = {}) {
   return { text: out, actions, errors };
 }
 
-async function resolveAndValidateUploads(conversationKey, rawPaths) {
+function buildUploadCandidates(rawPath, { sessionWorkdir, conversationDir }) {
+  const cleaned = normalizeUploadRawPath(rawPath);
+  if (!cleaned) return [];
+  if (path.isAbsolute(cleaned)) return [path.resolve(cleaned)];
+
+  const candidates = [];
+  if (sessionWorkdir) candidates.push(path.resolve(sessionWorkdir, cleaned));
+  candidates.push(path.resolve(conversationDir, cleaned));
+  return Array.from(new Set(candidates));
+}
+
+async function resolveAndValidateUploads(conversationKey, rawPaths, sessionWorkdir) {
   const conversationDir = getConversationUploadDir(conversationKey);
   await fsp.mkdir(conversationDir, { recursive: true });
 
@@ -642,32 +691,63 @@ async function resolveAndValidateUploads(conversationKey, rawPaths) {
 
   for (const raw of rawPaths || []) {
     if (maxFiles > 0 && files.length >= maxFiles) break;
-    const resolved = resolveUploadPath(raw, conversationDir);
-    if (!resolved) continue;
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
+    const candidates = buildUploadCandidates(raw, {
+      sessionWorkdir,
+      conversationDir,
+    });
+    if (candidates.length === 0) continue;
 
-    if (!isAllowedUploadPath(resolved, conversationDir)) {
-      errors.push(`Upload blocked (path not allowed): \`${path.basename(resolved)}\``);
-      continue;
-    }
-    let st;
-    try {
-      st = await fsp.stat(resolved);
-    } catch {
-      errors.push(`Upload missing: \`${path.basename(resolved)}\``);
-      continue;
-    }
-    if (!st.isFile()) {
-      errors.push(`Upload is not a file: \`${path.basename(resolved)}\``);
-      continue;
-    }
-    if (maxBytes > 0 && st.size > maxBytes) {
-      errors.push(`Upload too large (${st.size} bytes): \`${path.basename(resolved)}\``);
-      continue;
+    let pickedPath = null;
+    let blockedPath = null;
+    let nonFilePath = null;
+    let tooLarge = null;
+
+    for (const candidate of candidates) {
+      if (seen.has(candidate)) continue;
+      seen.add(candidate);
+
+      if (!isAllowedUploadPath(candidate, conversationDir)) {
+        blockedPath = candidate;
+        continue;
+      }
+
+      let st;
+      try {
+        st = await fsp.stat(candidate);
+      } catch {
+        continue;
+      }
+
+      if (!st.isFile()) {
+        nonFilePath = candidate;
+        continue;
+      }
+      if (maxBytes > 0 && st.size > maxBytes) {
+        tooLarge = { path: candidate, size: st.size };
+        continue;
+      }
+
+      pickedPath = candidate;
+      break;
     }
 
-    files.push({ attachment: resolved, name: path.basename(resolved) });
+    if (pickedPath) {
+      files.push({ attachment: pickedPath, name: path.basename(pickedPath) });
+      continue;
+    }
+    if (tooLarge) {
+      errors.push(`Upload too large (${tooLarge.size} bytes): \`${path.basename(tooLarge.path)}\``);
+      continue;
+    }
+    if (nonFilePath) {
+      errors.push(`Upload is not a file: \`${path.basename(nonFilePath)}\``);
+      continue;
+    }
+    if (blockedPath) {
+      errors.push(`Upload blocked (path not allowed): \`${path.basename(blockedPath)}\``);
+      continue;
+    }
+    errors.push(`Upload missing: \`${path.basename(candidates[0])}\``);
   }
 
   if (maxFiles > 0 && (rawPaths || []).length > maxFiles) {
@@ -1189,12 +1269,55 @@ function ensureAutoShape(session) {
   if (!session || typeof session !== "object") return false;
   let changed = false;
   if (!session.auto || typeof session.auto !== "object" || Array.isArray(session.auto)) {
-    session.auto = { actions: true };
+    session.auto = { actions: true, research: true };
     return true;
   }
   if (typeof session.auto.actions !== "boolean") {
     session.auto.actions = true;
     changed = true;
+  }
+  if (typeof session.auto.research !== "boolean") {
+    session.auto.research = true;
+    changed = true;
+  }
+  return changed;
+}
+
+function ensureResearchShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!session.research || typeof session.research !== "object" || Array.isArray(session.research)) {
+    session.research = {
+      enabled: false,
+      projectRoot: null,
+      slug: null,
+      managerConvKey: null,
+      lastNoteAt: null,
+    };
+    return true;
+  }
+  if (typeof session.research.enabled !== "boolean") {
+    session.research.enabled = false;
+    changed = true;
+  }
+  for (const key of ["projectRoot", "slug", "managerConvKey", "lastNoteAt"]) {
+    const value = session.research[key];
+    if (value != null && typeof value !== "string") {
+      session.research[key] = String(value || "");
+      changed = true;
+    }
+  }
+  if (!session.research.projectRoot) {
+    session.research.projectRoot = null;
+  }
+  if (!session.research.slug) {
+    session.research.slug = null;
+  }
+  if (!session.research.managerConvKey) {
+    session.research.managerConvKey = null;
+  }
+  if (!session.research.lastNoteAt) {
+    session.research.lastNoteAt = null;
   }
   return changed;
 }
@@ -1207,6 +1330,7 @@ function normalizeSessionAfterLoad(session) {
   changed = ensurePlansShape(session) || changed;
   changed = ensureJobsShape(session) || changed;
   changed = ensureAutoShape(session) || changed;
+  changed = ensureResearchShape(session) || changed;
 
   if (session.lastChannelId != null && typeof session.lastChannelId !== "string") {
     session.lastChannelId = null;
@@ -1252,6 +1376,9 @@ async function ensureStateLoaded() {
   await fsp.mkdir(CONFIG.stateDir, { recursive: true });
   if (CONFIG.uploadEnabled || CONFIG.discordAttachmentsEnabled) {
     await fsp.mkdir(CONFIG.uploadRootDir, { recursive: true });
+  }
+  if (CONFIG.researchEnabled && !CONFIG.researchProjectsRootError) {
+    await fsp.mkdir(CONFIG.researchProjectsRoot, { recursive: true });
   }
   try {
     const raw = await fsp.readFile(CONFIG.stateFile, "utf8");
@@ -1597,6 +1724,7 @@ function getSession(key) {
     ensurePlansShape(existing);
     ensureJobsShape(existing);
     ensureAutoShape(existing);
+    ensureResearchShape(existing);
     return existing;
   }
   const created = {
@@ -1608,7 +1736,14 @@ function getSession(key) {
     taskLoop: { running: false, stopRequested: false, currentTaskId: null },
     plans: [],
     jobs: [],
-    auto: { actions: true },
+    auto: { actions: true, research: true },
+    research: {
+      enabled: false,
+      projectRoot: null,
+      slug: null,
+      managerConvKey: null,
+      lastNoteAt: null,
+    },
     lastChannelId: null,
     lastGuildId: null,
   };
@@ -1633,7 +1768,7 @@ function extractPrompt(message, botUserId) {
 
 function parseCommand(prompt) {
   const match = prompt.match(
-    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|auto)\b(?:\s+([\s\S]+))?$/i
+    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|research|auto)\b(?:\s+([\s\S]+))?$/i
   );
   if (!match) return null;
   return {
@@ -1825,7 +1960,7 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /auto.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /research, /auto.",
     "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
     "- If you need to launch a long-running shell job and watch it, you may request relay actions via a JSON block:",
@@ -1992,14 +2127,31 @@ function waitForChildExit(child, label) {
     let done = false;
     let timeout = null;
     let killTimer = null;
+    let onError = null;
+    let onClose = null;
 
     const finish = (fn, value) => {
       if (done) return;
       done = true;
       if (timeout) clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
+      try {
+        if (onError) child.off("error", onError);
+      } catch {}
+      try {
+        if (onClose) child.off("close", onClose);
+      } catch {}
       fn(value);
     };
+
+    onError = (err) => finish(reject, err);
+    onClose = (code) => {
+      const resolvedCode =
+        typeof code === "number" ? code : typeof child.exitCode === "number" ? child.exitCode : 1;
+      finish(resolve, resolvedCode);
+    };
+    child.on("error", onError);
+    child.on("close", onClose);
 
     if (timeoutMs > 0) {
       timeout = setTimeout(() => {
@@ -2015,8 +2167,10 @@ function waitForChildExit(child, label) {
       }, timeoutMs);
     }
 
-    child.on("error", (err) => finish(reject, err));
-    child.on("close", (code) => finish(resolve, typeof code === "number" ? code : 1));
+    // Race guard: the process may have already exited before listeners were attached.
+    if (child.exitCode != null || child.signalCode != null) {
+      queueMicrotask(() => onClose(child.exitCode));
+    }
   });
 }
 
@@ -2221,6 +2375,16 @@ function isStaleThreadResumeError(err) {
   );
 }
 
+function isTransientClaudeInitError(err) {
+  const msg = String((err && err.message) || err || "");
+  if (!msg) return false;
+  return (
+    msg.includes("claude exit") &&
+    msg.includes('"type":"system"') &&
+    msg.includes('"subtype":"init"')
+  );
+}
+
 async function enqueueConversation(key, task) {
   const prev = queueByConversation.get(key) || Promise.resolve();
   const next = prev.catch(() => {}).then(task);
@@ -2268,6 +2432,1148 @@ function safeConversationDirName(conversationKey) {
   if (cleaned.length <= 80) return cleaned;
   const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 8);
   return `${cleaned.slice(0, 60)}-${hash}`;
+}
+
+function sanitizeResearchSlug(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  if (!raw) return "research";
+  return raw.slice(0, 48);
+}
+
+function stampCompact() {
+  const d = new Date();
+  const yyyy = String(d.getFullYear());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const HH = String(d.getHours()).padStart(2, "0");
+  const MM = String(d.getMinutes()).padStart(2, "0");
+  const SS = String(d.getSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
+}
+
+function managerConversationKeyFor(conversationKey) {
+  return `${String(conversationKey || "").trim()}::research:manager`;
+}
+
+function researchPaths(projectRoot) {
+  const root = path.resolve(projectRoot);
+  const ideaDir = path.join(root, "idea");
+  const expDir = path.join(root, "exp");
+  const resultsDir = path.join(expDir, "results");
+  const writingDir = path.join(root, "writing");
+  const managerDir = path.join(root, "manager");
+  const memoryDir = path.join(root, "memory");
+  return {
+    root,
+    ideaDir,
+    goalPath: path.join(ideaDir, "goal.md"),
+    hypothesesPath: path.join(ideaDir, "hypotheses.yaml"),
+    expDir,
+    registryPath: path.join(expDir, "registry.jsonl"),
+    resultsDir,
+    writingDir,
+    reportPath: path.join(writingDir, "REPORT.md"),
+    memoryDir,
+    handoffPath: path.join(memoryDir, "handoff.md"),
+    managerDir,
+    managerStatePath: path.join(managerDir, "state.json"),
+    eventsPath: path.join(managerDir, "events.jsonl"),
+  };
+}
+
+async function readJsonFileOr(filePath, fallbackValue) {
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : fallbackValue;
+  } catch {
+    return fallbackValue;
+  }
+}
+
+async function writeJsonAtomic(filePath, data) {
+  const target = path.resolve(filePath);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  await fsp.writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+  await fsp.rename(tmp, target);
+}
+
+async function appendJsonLine(filePath, payload) {
+  const target = path.resolve(filePath);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  await fsp.appendFile(target, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+async function readFileTailText(filePath, maxChars) {
+  const budget = Math.max(200, Math.floor(Number(maxChars || 0) || 0));
+  if (budget <= 0) return "";
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    if (raw.length <= budget) return raw;
+    return raw.slice(-budget);
+  } catch {
+    return "";
+  }
+}
+
+async function readJsonlTail(filePath, maxLines = 20) {
+  const n = Math.max(1, Math.min(200, Math.floor(Number(maxLines || 20) || 20)));
+  try {
+    const raw = await fsp.readFile(filePath, "utf8");
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    return lines.slice(-n).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function defaultResearchManagerState({ projectRoot, goal, channelId, guildId }) {
+  const started = nowIso();
+  return {
+    version: 1,
+    projectRoot: path.resolve(projectRoot),
+    goal: String(goal || "").trim(),
+    status: "paused",
+    phase: "plan",
+    autoRun: false,
+    budgets: {
+      maxSteps: CONFIG.researchDefaultMaxSteps,
+      maxWallClockMinutes: CONFIG.researchDefaultMaxWallclockMin,
+      maxRuns: CONFIG.researchDefaultMaxRuns,
+    },
+    counters: {
+      steps: 0,
+      runs: 0,
+    },
+    lease: null,
+    inflightStep: {
+      stepId: null,
+      decisionHash: null,
+      status: "idle",
+    },
+    active: {
+      jobId: null,
+      runId: null,
+    },
+    discord: {
+      channelId: String(channelId || ""),
+      guildId: guildId ? String(guildId) : null,
+    },
+    startedAt: started,
+    lastFeedbackAt: null,
+    lastDecisionAt: null,
+    appliedDecisionHashes: [],
+    appliedActionKeys: [],
+    lastUpdateAt: started,
+  };
+}
+
+async function ensureResearchProjectScaffold({
+  conversationKey,
+  goal,
+  channelId,
+  guildId,
+}) {
+  const convSlug = safeConversationDirName(conversationKey);
+  const goalSlug = sanitizeResearchSlug(goal);
+  const root = path.join(CONFIG.researchProjectsRoot, convSlug, `${stampCompact()}-${goalSlug}`);
+  const p = researchPaths(root);
+
+  await fsp.mkdir(p.ideaDir, { recursive: true });
+  await fsp.mkdir(p.resultsDir, { recursive: true });
+  await fsp.mkdir(p.writingDir, { recursive: true });
+  await fsp.mkdir(p.managerDir, { recursive: true });
+  await fsp.mkdir(p.memoryDir, { recursive: true });
+
+  await fsp.writeFile(
+    p.goalPath,
+    [`# Research Goal`, "", String(goal || "").trim(), ""].join("\n"),
+    "utf8"
+  );
+  await fsp.writeFile(
+    p.hypothesesPath,
+    ['version: 1', `updated_at: "${nowIso()}"`, "hypotheses: []", ""].join("\n"),
+    "utf8"
+  );
+  await fsp.writeFile(p.registryPath, "", "utf8");
+  await fsp.writeFile(
+    p.reportPath,
+    [`# REPORT`, "", `Created: ${nowIso()}`, "", `Goal: ${String(goal || "").trim()}`, ""].join("\n"),
+    "utf8"
+  );
+  await fsp.writeFile(p.handoffPath, "", "utf8");
+
+  const stateObj = defaultResearchManagerState({
+    projectRoot: p.root,
+    goal,
+    channelId,
+    guildId,
+  });
+  await writeJsonAtomic(p.managerStatePath, stateObj);
+  await appendJsonLine(p.eventsPath, {
+    type: "research_started",
+    ts: nowIso(),
+    conversationKey,
+    goal: String(goal || "").trim(),
+    projectRoot: p.root,
+  });
+  return { root: p.root, paths: p, managerState: stateObj };
+}
+
+async function loadResearchManagerState(projectRoot) {
+  const p = researchPaths(projectRoot);
+  return readJsonFileOr(
+    p.managerStatePath,
+    defaultResearchManagerState({ projectRoot: p.root, goal: "", channelId: "", guildId: null })
+  );
+}
+
+async function saveResearchManagerState(projectRoot, nextState) {
+  const p = researchPaths(projectRoot);
+  const out = nextState && typeof nextState === "object" ? nextState : {};
+  out.projectRoot = p.root;
+  out.lastUpdateAt = nowIso();
+  await writeJsonAtomic(p.managerStatePath, out);
+}
+
+async function appendResearchEvent(projectRoot, event) {
+  const p = researchPaths(projectRoot);
+  await appendJsonLine(p.eventsPath, {
+    ...(event && typeof event === "object" ? event : { value: String(event || "") }),
+    ts: (event && event.ts) || nowIso(),
+  });
+}
+
+function newResearchRunId(counter) {
+  const n = Math.max(1, Math.floor(Number(counter || 1) || 1));
+  return `r${String(n).padStart(4, "0")}`;
+}
+
+function safeShellArg(value) {
+  return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function leaseIsActive(lease) {
+  if (!lease || typeof lease !== "object") return false;
+  const expiresAt = Date.parse(String(lease.expiresAt || ""));
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function acquireResearchLease(stateObj, holder) {
+  if (leaseIsActive(stateObj && stateObj.lease)) return null;
+  const ttlSec = Math.max(15, CONFIG.researchLeaseTtlSec);
+  const acquiredAt = nowIso();
+  const expiresAt = new Date(Date.now() + ttlSec * 1000).toISOString();
+  const token = `lease-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  stateObj.lease = {
+    holder: String(holder || "research-step-runner"),
+    token,
+    acquiredAt,
+    expiresAt,
+  };
+  return token;
+}
+
+function releaseResearchLease(stateObj, token) {
+  if (!stateObj || typeof stateObj !== "object") return;
+  if (!stateObj.lease || typeof stateObj.lease !== "object") {
+    stateObj.lease = null;
+    return;
+  }
+  if (!token || String(stateObj.lease.token || "") === String(token)) {
+    stateObj.lease = null;
+  }
+}
+
+function shouldAllowResearchControl({ isDm, session, requireConversationToggle = true }) {
+  if (!CONFIG.researchEnabled) {
+    return { ok: false, reason: "RELAY_RESEARCH_ENABLED=false" };
+  }
+  if (CONFIG.researchProjectsRootError) {
+    return { ok: false, reason: CONFIG.researchProjectsRootError };
+  }
+  if (CONFIG.researchDmOnly && !isDm) {
+    return { ok: false, reason: "RELAY_RESEARCH_DM_ONLY=true" };
+  }
+  ensureAutoShape(session);
+  if (requireConversationToggle && session && session.auto && session.auto.research === false) {
+    return { ok: false, reason: "conversation research automation is OFF (/auto research off)" };
+  }
+  return { ok: true, reason: "" };
+}
+
+function extractResearchDecision(text) {
+  const rawText = String(text || "");
+  const rawLower = rawText.toLowerCase();
+  const startMarker = "[[research-decision]]";
+  const endMarker = "[[/research-decision]]";
+  const start = rawLower.indexOf(startMarker);
+  if (start < 0) {
+    return { ok: false, error: "missing [[research-decision]] block", decision: null, cleanedText: rawText };
+  }
+  const end = rawLower.indexOf(endMarker, start + startMarker.length);
+  if (end < 0) {
+    return { ok: false, error: "missing [[/research-decision]] terminator", decision: null, cleanedText: rawText };
+  }
+  const payload = rawText.slice(start + startMarker.length, end).trim();
+  const cleanedText = `${rawText.slice(0, start)}${rawText.slice(end + endMarker.length)}`.trim();
+  if (!payload) {
+    return { ok: false, error: "empty research-decision payload", decision: null, cleanedText };
+  }
+  if (payload.length > 100000) {
+    return { ok: false, error: "research-decision payload too large", decision: null, cleanedText };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(payload);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `research-decision JSON parse failed: ${String(err && err.message ? err.message : err).slice(0, 200)}`,
+      decision: null,
+      cleanedText,
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: "research-decision payload must be an object", decision: null, cleanedText };
+  }
+  const stepId = String(parsed.stepId || "").trim();
+  if (!stepId) {
+    return { ok: false, error: "research-decision missing stepId", decision: null, cleanedText };
+  }
+  const actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+  return {
+    ok: true,
+    error: "",
+    cleanedText,
+    decision: {
+      stepId: stepId.length > 120 ? stepId.slice(0, 120) : stepId,
+      research_update: parsed.research_update == null ? null : parsed.research_update,
+      actions,
+      raw: parsed,
+    },
+  };
+}
+
+function normalizeResearchAction(rawAction) {
+  if (!rawAction || typeof rawAction !== "object" || Array.isArray(rawAction)) {
+    return { ok: false, error: "action is not an object", action: null };
+  }
+  const type = String(rawAction.type || "").trim().toLowerCase();
+  if (!type) return { ok: false, error: "missing action.type", action: null };
+
+  const key = String(rawAction.idempotencyKey || "").trim();
+  if (!key) return { ok: false, error: `${type}: missing idempotencyKey`, action: null };
+  const idempotencyKey = key.length > 160 ? key.slice(0, 160) : key;
+
+  if (type === "write_report") {
+    const markdown = String(rawAction.markdown || "").trim();
+    if (!markdown) return { ok: false, error: "write_report: missing markdown", action: null };
+    const modeRaw = String(rawAction.mode || "append").trim().toLowerCase();
+    const mode = modeRaw === "replace" ? "replace" : "append";
+    return {
+      ok: true,
+      error: "",
+      action: {
+        type,
+        idempotencyKey,
+        markdown: markdown.length > 20000 ? markdown.slice(0, 20000) : markdown,
+        mode,
+      },
+    };
+  }
+
+  if (type === "research_pause" || type === "research_mark_done") {
+    const reasonRaw = rawAction.reason == null ? "" : String(rawAction.reason || "").trim();
+    const reason = reasonRaw ? (reasonRaw.length > 500 ? reasonRaw.slice(0, 500) : reasonRaw) : "";
+    return { ok: true, error: "", action: { type, idempotencyKey, reason } };
+  }
+
+  const baseInput = { ...rawAction };
+  delete baseInput.idempotencyKey;
+  const base = normalizeRelayAction(baseInput);
+  if (!base.ok) return base;
+  return {
+    ok: true,
+    error: "",
+    action: {
+      ...base.action,
+      idempotencyKey,
+    },
+  };
+}
+
+function validateAndNormalizeResearchActions(actions, { session, isDm, origin }) {
+  const errs = [];
+  const out = [];
+  const list = Array.isArray(actions) ? actions : [];
+  if (origin !== "research_manager") {
+    return { ok: false, error: "origin must be research_manager", actions: [], errors: ["invalid origin"] };
+  }
+
+  const gate = shouldAllowResearchControl({ isDm, session });
+  if (!gate.ok) {
+    return { ok: false, error: gate.reason, actions: [], errors: [gate.reason] };
+  }
+
+  const allowed = CONFIG.researchActionsAllowed instanceof Set ? CONFIG.researchActionsAllowed : new Set();
+  const budget = Math.max(1, CONFIG.researchMaxActionsPerStep);
+  for (const rawAction of list) {
+    if (out.length >= budget) {
+      errs.push(`max actions per step reached (${budget})`);
+      break;
+    }
+    const normalized = normalizeResearchAction(rawAction);
+    if (!normalized.ok) {
+      errs.push(normalized.error);
+      continue;
+    }
+    const type = String(normalized.action.type || "").trim().toLowerCase();
+    if (allowed.size > 0 && !allowed.has(type)) {
+      errs.push(`${type}: blocked (not in RELAY_RESEARCH_ACTIONS_ALLOWED)`);
+      continue;
+    }
+    out.push(normalized.action);
+  }
+  return { ok: errs.length === 0, error: errs[0] || "", actions: out, errors: errs };
+}
+
+async function loadFeedbackEventsSince(projectRoot, sinceIso) {
+  const p = researchPaths(projectRoot);
+  const threshold = sinceIso ? Date.parse(String(sinceIso || "")) : NaN;
+  const out = [];
+  try {
+    const raw = await fsp.readFile(p.eventsPath, "utf8");
+    const lines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!evt || typeof evt !== "object") continue;
+      if (String(evt.type || "") !== "user_feedback") continue;
+      const ts = Date.parse(String(evt.ts || ""));
+      if (Number.isFinite(threshold) && Number.isFinite(ts) && ts <= threshold) continue;
+      out.push(evt);
+    }
+  } catch {}
+  return out.slice(-20);
+}
+
+function summarizeResearchUpdate(value, maxChars = 1200) {
+  const budget = Math.max(200, Math.floor(Number(maxChars || 0) || 1200));
+  if (typeof value === "string") {
+    const cleaned = value.trim();
+    return cleaned.length > budget ? `${cleaned.slice(0, budget)}...` : cleaned;
+  }
+  if (value == null) return "";
+  let text = "";
+  try {
+    text = JSON.stringify(value, null, 2);
+  } catch {
+    text = String(value);
+  }
+  text = text.trim();
+  return text.length > budget ? `${text.slice(0, budget)}...` : text;
+}
+
+async function buildResearchManagerPrompt({ projectRoot, stateObj }) {
+  const p = researchPaths(projectRoot);
+  const goal = (await readFileTailText(p.goalPath, 6000)).trim();
+  const hypotheses = (await readFileTailText(p.hypothesesPath, 6000)).trim();
+  const registryTail = (await readJsonlTail(p.registryPath, 20)).trim();
+  const reportTail = (await readFileTailText(p.reportPath, 8000)).trim();
+  const feedback = await loadFeedbackEventsSince(projectRoot, stateObj.lastFeedbackAt);
+
+  const feedbackLines = feedback.map((evt) => {
+    const text = String(evt.text || "").replace(/\s+/g, " ").trim();
+    return `- ${evt.ts || ""} ${text}`;
+  });
+
+  return [
+    "You are the research manager for an unattended experiment loop.",
+    "Output exactly one JSON object wrapped in markers:",
+    "[[research-decision]]",
+    '{"stepId":"s-0001","research_update":{"summary":"..."}, "actions":[...]}',
+    "[[/research-decision]]",
+    "",
+    "Rules:",
+    "- Keep research_update concise and concrete.",
+    "- Propose only actions that are necessary for the next step.",
+    "- Include idempotencyKey on every action.",
+    "- If a long run is needed, use job_start and write metrics.json to RUN_DIR.",
+    "- Do not emit any markdown outside the decision marker block.",
+    "",
+    `State status: ${stateObj.status}`,
+    `State phase: ${stateObj.phase}`,
+    `Budgets: ${JSON.stringify(stateObj.budgets || {})}`,
+    `Counters: ${JSON.stringify(stateObj.counters || {})}`,
+    `Active: ${JSON.stringify(stateObj.active || {})}`,
+    "",
+    "[Goal]",
+    goal || "(none)",
+    "",
+    "[Hypotheses]",
+    hypotheses || "(none)",
+    "",
+    "[Recent registry entries]",
+    registryTail || "(none)",
+    "",
+    "[Report tail]",
+    reportTail || "(none)",
+    "",
+    "[New user feedback delta]",
+    feedbackLines.length > 0 ? feedbackLines.join("\n") : "(none)",
+  ].join("\n");
+}
+
+function trimArrayUniquePush(list, value, maxItems) {
+  const arr = Array.isArray(list) ? list : [];
+  const v = String(value || "").trim();
+  if (!v) return arr;
+  if (!arr.includes(v)) arr.push(v);
+  const keep = Math.max(1, Math.floor(Number(maxItems || 0) || 1000));
+  if (arr.length > keep) arr.splice(0, arr.length - keep);
+  return arr;
+}
+
+async function executeResearchActions({
+  actions,
+  conversationKey,
+  session,
+  channel,
+  isDm,
+  isThread,
+  projectRoot,
+  managerState,
+  stepId,
+}) {
+  const lines = [];
+  let executed = 0;
+  const p = researchPaths(projectRoot);
+  if (!Array.isArray(managerState.appliedActionKeys)) managerState.appliedActionKeys = [];
+
+  for (const action of actions || []) {
+    if (!action || typeof action !== "object") continue;
+    const type = String(action.type || "").trim().toLowerCase();
+    const idem = String(action.idempotencyKey || "").trim();
+    if (!type) continue;
+    if (idem && managerState.appliedActionKeys.includes(idem)) {
+      lines.push(`- ${type}: skipped duplicate idempotencyKey \`${idem}\``);
+      continue;
+    }
+
+    if (type === "job_start") {
+      const existing = findLatestJob(session, { requireRunning: true });
+      if (existing) return { ok: false, executed, lines, error: `job_start refused: ${existing.id} is still running` };
+
+      const nextRunN = Number((managerState.counters && managerState.counters.runs) || 0) + 1;
+      const runId = newResearchRunId(nextRunN);
+      const runDir = path.join(p.resultsDir, runId);
+      const stdoutPath = path.join(runDir, "stdout.log");
+      const metricsPath = path.join(runDir, "metrics.json");
+      await fsp.mkdir(runDir, { recursive: true });
+
+      const rawCommand = String(action.command || "").trim();
+      if (!rawCommand) return { ok: false, executed, lines, error: "job_start missing command" };
+      const wrappedCommand = [
+        `mkdir -p ${safeShellArg(runDir)}`,
+        `export RUN_ID=${safeShellArg(runId)}`,
+        `export RUN_DIR=${safeShellArg(runDir)}`,
+        `(${rawCommand}) > ${safeShellArg(stdoutPath)} 2>&1`,
+      ].join(" && ");
+
+      const started = await startJobProcess({
+        conversationKey,
+        session,
+        command: wrappedCommand,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
+      });
+      if (!started.ok || !started.job) {
+        return { ok: false, executed, lines, error: started.error || "job_start failed" };
+      }
+      const job = started.job;
+      job.research = {
+        projectRoot: p.root,
+        stepId: String(stepId || ""),
+        runId,
+        runDir,
+        stdoutPath,
+        metricsPath,
+      };
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
+        everySecDefault: CONFIG.jobsAutoWatchEverySec,
+        tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+      });
+      const watchRes = await startJobWatcher({
+        conversationKey,
+        session,
+        job,
+        channelId: channel && channel.id ? String(channel.id) : session.lastChannelId,
+        watchConfig: watchCfg,
+      });
+      if (!watchRes || !watchRes.ok) {
+        return { ok: false, executed, lines, error: "job_start succeeded but watcher failed to start" };
+      }
+
+      managerState.active = { jobId: job.id, runId };
+      if (!managerState.counters || typeof managerState.counters !== "object") managerState.counters = { steps: 0, runs: 0 };
+      managerState.counters.runs = nextRunN;
+
+      await appendResearchEvent(projectRoot, {
+        type: "run_started",
+        conversationKey,
+        stepId,
+        runId,
+        jobId: job.id,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
+        artifacts: { runDir, stdoutPath, metricsPath },
+      });
+
+      executed += 1;
+      lines.push(`- job_start: \`${job.id}\` run=\`${runId}\``);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "job_watch") {
+      const job = findLatestJob(session, { requireRunning: true }) || findLatestJob(session, { requireRunning: false });
+      if (!job) return { ok: false, executed, lines, error: "job_watch failed: no job found" };
+      const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
+        everySecDefault: CONFIG.jobsAutoWatchEverySec,
+        tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+      });
+      const res = await startJobWatcher({
+        conversationKey,
+        session,
+        job,
+        channelId: channel && channel.id ? String(channel.id) : session.lastChannelId,
+        watchConfig: watchCfg,
+      });
+      if (!res || !res.ok) return { ok: false, executed, lines, error: "job_watch failed" };
+      executed += 1;
+      lines.push(`- job_watch: \`${job.id}\``);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "job_stop") {
+      const job = findLatestJob(session, { requireRunning: true });
+      if (!job) return { ok: false, executed, lines, error: "job_stop failed: no running job" };
+      const pid = job.pid;
+      killProcessGroup(pid, "SIGTERM");
+      job.status = "canceled";
+      job.finishedAt = job.finishedAt || nowIso();
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await stopJobWatcher(conversationKey, job.id);
+      executed += 1;
+      lines.push(`- job_stop: \`${job.id}\``);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "task_add") {
+      if (!CONFIG.tasksEnabled) return { ok: false, executed, lines, error: "task_add blocked: RELAY_TASKS_ENABLED=false" };
+      ensureTasksShape(session);
+      const pending = session.tasks.filter((t) => t && t.status === "pending").length;
+      if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+        return { ok: false, executed, lines, error: `task_add blocked: queue full (pending=${pending}, max=${CONFIG.tasksMaxPending})` };
+      }
+      const task = createTask(session, String(action.text || ""));
+      session.tasks.push(task);
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      executed += 1;
+      lines.push(`- task_add: \`${task.id}\``);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "task_run") {
+      const res = await maybeStartTaskRunner(conversationKey, channel, session, { isDm, isThread });
+      executed += 1;
+      lines.push(`- task_run: ${res && res.started ? "started" : "noop"}`);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "write_report") {
+      const mode = String(action.mode || "append").toLowerCase() === "replace" ? "replace" : "append";
+      const markdown = String(action.markdown || "").trim();
+      if (!markdown) return { ok: false, executed, lines, error: "write_report missing markdown" };
+      if (mode === "replace") {
+        await fsp.writeFile(p.reportPath, `${markdown}\n`, "utf8");
+      } else {
+        await fsp.appendFile(p.reportPath, `\n\n${markdown}\n`, "utf8");
+      }
+      executed += 1;
+      lines.push(`- write_report: ${mode}`);
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "research_pause") {
+      managerState.status = "paused";
+      managerState.autoRun = false;
+      executed += 1;
+      lines.push("- research_pause");
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    if (type === "research_mark_done") {
+      managerState.status = "done";
+      managerState.autoRun = false;
+      executed += 1;
+      lines.push("- research_mark_done");
+      managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
+      continue;
+    }
+
+    return { ok: false, executed, lines, error: `unsupported research action type: ${type}` };
+  }
+
+  return { ok: true, executed, lines, error: "" };
+}
+
+async function appendResearchReportDigest(projectRoot, title, body) {
+  const p = researchPaths(projectRoot);
+  const ts = nowIso();
+  const cleanTitle = String(title || "").trim() || "Research update";
+  const cleanBody = String(body || "").trim();
+  const section = [`## ${ts} — ${cleanTitle}`, cleanBody || "(no details)", ""].join("\n");
+  await fsp.appendFile(p.reportPath, `\n${section}\n`, "utf8");
+}
+
+async function runResearchManagerStep({
+  conversationKey,
+  session,
+  channel,
+  isDm,
+  isThread,
+  trigger = "manual",
+}) {
+  ensureAutoShape(session);
+  ensureResearchShape(session);
+
+  const gate = shouldAllowResearchControl({ isDm, session });
+  if (!gate.ok) {
+    return { ok: false, blocked: true, message: gate.reason };
+  }
+  if (!session.research || !session.research.enabled || !session.research.projectRoot) {
+    return { ok: false, blocked: true, message: "No active research project. Use `/research start <goal...>` first." };
+  }
+
+  const projectRoot = path.resolve(session.research.projectRoot);
+  const managerState = await loadResearchManagerState(projectRoot);
+  const autoTrigger = trigger !== "manual" && trigger !== "run";
+  if (autoTrigger && managerState.status !== "running") {
+    return { ok: true, skipped: true, message: `research status is ${managerState.status}` };
+  }
+  if (managerState.status === "done") {
+    return { ok: true, skipped: true, message: "research already marked done" };
+  }
+  if (managerState.status === "blocked" && trigger !== "manual") {
+    return { ok: true, skipped: true, message: "research is blocked; manual `/research step` required" };
+  }
+
+  if (!managerState.counters || typeof managerState.counters !== "object") managerState.counters = { steps: 0, runs: 0 };
+  if (!managerState.budgets || typeof managerState.budgets !== "object") {
+    managerState.budgets = {
+      maxSteps: CONFIG.researchDefaultMaxSteps,
+      maxWallClockMinutes: CONFIG.researchDefaultMaxWallclockMin,
+      maxRuns: CONFIG.researchDefaultMaxRuns,
+    };
+  }
+  if (managerState.counters.steps >= Number(managerState.budgets.maxSteps || 0)) {
+    managerState.status = "blocked";
+    managerState.autoRun = false;
+    await appendResearchEvent(projectRoot, {
+      type: "research_blocked_budget",
+      reason: "maxSteps reached",
+      steps: managerState.counters.steps,
+      budget: managerState.budgets.maxSteps,
+      trigger,
+    });
+    await saveResearchManagerState(projectRoot, managerState);
+    return { ok: false, blocked: true, message: "blocked: max steps budget reached" };
+  }
+  if (managerState.counters.runs >= Number(managerState.budgets.maxRuns || 0)) {
+    managerState.status = "blocked";
+    managerState.autoRun = false;
+    await appendResearchEvent(projectRoot, {
+      type: "research_blocked_budget",
+      reason: "maxRuns reached",
+      runs: managerState.counters.runs,
+      budget: managerState.budgets.maxRuns,
+      trigger,
+    });
+    await saveResearchManagerState(projectRoot, managerState);
+    return { ok: false, blocked: true, message: "blocked: max runs budget reached" };
+  }
+  const startedAtMs = Date.parse(String(managerState.startedAt || ""));
+  if (Number.isFinite(startedAtMs)) {
+    const elapsedMin = Math.floor((Date.now() - startedAtMs) / 60000);
+    if (elapsedMin >= Number(managerState.budgets.maxWallClockMinutes || 0)) {
+      managerState.status = "blocked";
+      managerState.autoRun = false;
+      await appendResearchEvent(projectRoot, {
+        type: "research_blocked_budget",
+        reason: "maxWallClockMinutes reached",
+        elapsedMin,
+        budget: managerState.budgets.maxWallClockMinutes,
+        trigger,
+      });
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: false, blocked: true, message: "blocked: wallclock budget reached" };
+    }
+  }
+
+  const runningJob = findLatestJob(session, { requireRunning: true });
+  if (runningJob && managerState.active && managerState.active.jobId === runningJob.id) {
+    return { ok: true, skipped: true, message: `waiting for active job ${runningJob.id}` };
+  }
+
+  const leaseToken = acquireResearchLease(managerState, `conv:${conversationKey}`);
+  if (!leaseToken) {
+    return { ok: true, skipped: true, message: "another research step is currently in flight" };
+  }
+
+  const managerConvKey = session.research.managerConvKey || managerConversationKeyFor(conversationKey);
+  session.research.managerConvKey = managerConvKey;
+  session.updatedAt = nowIso();
+  await queueSaveState();
+
+  const managerSession = getSession(managerConvKey);
+  if (managerSession.workdir !== projectRoot) {
+    managerSession.workdir = projectRoot;
+    managerSession.threadId = null;
+    managerSession.contextVersion = 0;
+  }
+
+  managerState.inflightStep = { stepId: null, decisionHash: null, status: "running" };
+  managerState.phase = "plan";
+  await saveResearchManagerState(projectRoot, managerState);
+
+  try {
+    const prompt = await buildResearchManagerPrompt({ projectRoot, stateObj: managerState });
+    const result = await runAgent(
+      managerSession,
+      prompt,
+      CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: getConversationUploadDir(conversationKey) } : null,
+      null,
+      managerConvKey
+    );
+    managerSession.threadId = result.threadId || managerSession.threadId;
+    managerSession.updatedAt = nowIso();
+    await queueSaveState();
+
+    const extracted = extractResearchDecision(result.text || "");
+    if (!extracted.ok || !extracted.decision) {
+      managerState.inflightStep = { stepId: null, decisionHash: null, status: "failed" };
+      managerState.status = "blocked";
+      managerState.autoRun = false;
+      releaseResearchLease(managerState, leaseToken);
+      await appendResearchEvent(projectRoot, {
+        type: "decision_parse_failed",
+        trigger,
+        error: extracted.error,
+      });
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: false, blocked: true, message: `decision parse failed: ${extracted.error}` };
+    }
+
+    const decision = extracted.decision;
+    const decisionHash = crypto
+      .createHash("sha256")
+      .update(JSON.stringify(decision.raw || decision))
+      .digest("hex");
+    managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "running" };
+
+    if (!Array.isArray(managerState.appliedDecisionHashes)) managerState.appliedDecisionHashes = [];
+    if (managerState.appliedDecisionHashes.includes(decisionHash)) {
+      managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "applied" };
+      managerState.phase = "analyze";
+      managerState.lastDecisionAt = nowIso();
+      releaseResearchLease(managerState, leaseToken);
+      await appendResearchEvent(projectRoot, {
+        type: "decision_duplicate_skipped",
+        stepId: decision.stepId,
+        decisionHash,
+      });
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: true, skipped: true, message: `duplicate decision skipped (${decision.stepId})` };
+    }
+
+    const validated = validateAndNormalizeResearchActions(decision.actions, {
+      session,
+      isDm,
+      origin: "research_manager",
+    });
+    if (!validated.ok) {
+      managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "failed" };
+      managerState.status = "blocked";
+      managerState.autoRun = false;
+      releaseResearchLease(managerState, leaseToken);
+      await appendResearchEvent(projectRoot, {
+        type: "action_validation_failed",
+        stepId: decision.stepId,
+        decisionHash,
+        errors: validated.errors,
+      });
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: false, blocked: true, message: `action validation failed: ${validated.errors.join("; ")}` };
+    }
+    if (validated.actions.length === 0) {
+      managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "failed" };
+      managerState.status = "blocked";
+      managerState.autoRun = false;
+      releaseResearchLease(managerState, leaseToken);
+      await appendResearchEvent(projectRoot, {
+        type: "decision_no_actions",
+        stepId: decision.stepId,
+        decisionHash,
+      });
+      await appendResearchReportDigest(projectRoot, `Blocked ${decision.stepId}`, "Manager returned zero actions; awaiting user direction.");
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: false, blocked: true, message: "manager returned zero actions; research blocked for safety" };
+    }
+
+    const execRes = await executeResearchActions({
+      actions: validated.actions,
+      conversationKey,
+      session,
+      channel,
+      isDm,
+      isThread,
+      projectRoot,
+      managerState,
+      stepId: decision.stepId,
+    });
+    if (!execRes.ok) {
+      managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "failed" };
+      managerState.status = "blocked";
+      managerState.autoRun = false;
+      releaseResearchLease(managerState, leaseToken);
+      await appendResearchEvent(projectRoot, {
+        type: "action_failed",
+        stepId: decision.stepId,
+        decisionHash,
+        error: execRes.error,
+        detail: execRes.lines,
+      });
+      await appendResearchReportDigest(projectRoot, `Failure ${decision.stepId}`, execRes.error || "(unknown)");
+      await saveResearchManagerState(projectRoot, managerState);
+      return { ok: false, blocked: true, message: `action execution failed: ${execRes.error}` };
+    }
+
+    managerState.counters.steps = Number(managerState.counters.steps || 0) + 1;
+    managerState.appliedDecisionHashes = trimArrayUniquePush(managerState.appliedDecisionHashes, decisionHash, 500);
+    managerState.lastDecisionAt = nowIso();
+    managerState.lastFeedbackAt = nowIso();
+    managerState.phase = managerState.active && managerState.active.jobId ? "wait" : "analyze";
+    if (!managerState.status || managerState.status === "paused") {
+      managerState.status = trigger === "run" ? "running" : "paused";
+    }
+    managerState.inflightStep = { stepId: decision.stepId, decisionHash, status: "applied" };
+    releaseResearchLease(managerState, leaseToken);
+
+    const updateSummary = summarizeResearchUpdate(decision.research_update, 1500);
+    await appendResearchEvent(projectRoot, {
+      type: "decision_applied",
+      stepId: decision.stepId,
+      decisionHash,
+      actions: validated.actions.map((a) => a.type),
+      executed: execRes.executed,
+      trigger,
+    });
+    await appendResearchReportDigest(
+      projectRoot,
+      `Step ${decision.stepId}`,
+      [updateSummary ? `Research update:\n${updateSummary}` : null, execRes.lines.length ? `Actions:\n${execRes.lines.join("\n")}` : null]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+    await saveResearchManagerState(projectRoot, managerState);
+
+    return {
+      ok: true,
+      message: `step ${decision.stepId} applied (actions=${execRes.executed})`,
+      detailLines: execRes.lines,
+      researchUpdate: updateSummary,
+    };
+  } catch (err) {
+    managerState.inflightStep = {
+      stepId: managerState.inflightStep && managerState.inflightStep.stepId ? managerState.inflightStep.stepId : null,
+      decisionHash: managerState.inflightStep && managerState.inflightStep.decisionHash ? managerState.inflightStep.decisionHash : null,
+      status: "failed",
+    };
+    managerState.status = "blocked";
+    managerState.autoRun = false;
+    releaseResearchLease(managerState, leaseToken);
+    await appendResearchEvent(projectRoot, {
+      type: "research_step_error",
+      trigger,
+      error: String(err && err.message ? err.message : err).slice(0, 400),
+    });
+    await saveResearchManagerState(projectRoot, managerState);
+    return {
+      ok: false,
+      blocked: true,
+      message: `research step failed: ${String(err && err.message ? err.message : err).slice(0, 240)}`,
+    };
+  }
+}
+
+function requestResearchAutoStep(conversationKey, channel, reason) {
+  const key = String(conversationKey || "").trim();
+  if (!key) return false;
+  if (researchStepByConversation.has(key)) return false;
+  researchStepByConversation.add(key);
+  void enqueueConversation(key, async () => {
+    try {
+      const session = getSession(key);
+      const isDm = !session.lastGuildId;
+      const isThread = Boolean(channel && channel.isThread && channel.isThread());
+      const res = await runResearchManagerStep({
+        conversationKey: key,
+        session,
+        channel,
+        isDm,
+        isThread,
+        trigger: reason || "auto",
+      });
+      if (channel && res && res.message) {
+        const tag = res.ok ? "[research:auto]" : "[research:auto blocked]";
+        await channel.send(`${tag} ${res.message}`);
+      }
+    } catch (err) {
+      try {
+        if (channel) await channel.send(`[research:auto error] ${String(err && err.message ? err.message : err).slice(0, 400)}`);
+      } catch {}
+    } finally {
+      researchStepByConversation.delete(key);
+    }
+  });
+  return true;
+}
+
+async function handleResearchJobCompletion({ conversationKey, session, job, exitCode, channel }) {
+  if (!job || typeof job !== "object") return;
+  const meta = job.research;
+  if (!meta || typeof meta !== "object") return;
+  const projectRoot = String(meta.projectRoot || "").trim();
+  if (!projectRoot) return;
+
+  const p = researchPaths(projectRoot);
+  const runId = String(meta.runId || "").trim() || null;
+  const runDir = String(meta.runDir || "").trim() || (runId ? path.join(p.resultsDir, runId) : "");
+  const stdoutPath = String(meta.stdoutPath || "").trim() || (runDir ? path.join(runDir, "stdout.log") : "");
+  const metricsPath = String(meta.metricsPath || "").trim() || (runDir ? path.join(runDir, "metrics.json") : "");
+
+  let metricsObj = null;
+  let metricsError = "";
+  try {
+    const raw = await fsp.readFile(metricsPath, "utf8");
+    metricsObj = JSON.parse(raw);
+    if (!metricsObj || typeof metricsObj !== "object") {
+      metricsObj = null;
+      metricsError = "metrics.json is not an object";
+    }
+  } catch (err) {
+    metricsObj = null;
+    metricsError = String(err && err.message ? err.message : err);
+  }
+  const metricsValid = Boolean(metricsObj && typeof metricsObj === "object");
+  const primaryMetric =
+    metricsValid && metricsObj.primary_metric && typeof metricsObj.primary_metric === "object"
+      ? metricsObj.primary_metric
+      : null;
+
+  await appendJsonLine(p.registryPath, {
+    run_id: runId,
+    started_at: job.startedAt || null,
+    ended_at: job.finishedAt || nowIso(),
+    workdir: job.workdir || null,
+    job_id: job.id || null,
+    artifacts: {
+      run_dir: runDir || null,
+      metrics: metricsPath || null,
+      log: stdoutPath || null,
+    },
+    metrics: metricsValid
+      ? {
+          primary: primaryMetric || null,
+          all: metricsObj.metrics && typeof metricsObj.metrics === "object" ? metricsObj.metrics : metricsObj,
+        }
+      : null,
+    status: metricsValid ? "ok" : "invalid",
+    notes: metricsValid ? "" : `missing_or_invalid_metrics: ${metricsError}`,
+  });
+
+  const managerState = await loadResearchManagerState(projectRoot);
+  if (managerState.active && managerState.active.jobId && String(managerState.active.jobId) === String(job.id)) {
+    managerState.active = { jobId: null, runId: null };
+  }
+
+  await appendResearchEvent(projectRoot, {
+    type: "run_finished",
+    runId,
+    jobId: job.id || null,
+    exitCode: Number.isFinite(Number(exitCode)) ? Number(exitCode) : null,
+    metricsValid,
+    metricsPath,
+    metricsError: metricsValid ? null : metricsError,
+  });
+
+  if (!metricsValid) {
+    managerState.status = "blocked";
+    managerState.autoRun = false;
+    await appendResearchReportDigest(
+      projectRoot,
+      `Run ${runId || job.id || "unknown"} invalid`,
+      `metrics.json missing or invalid at \`${metricsPath}\`.`
+    );
+  }
+  await saveResearchManagerState(projectRoot, managerState);
+
+  if (channel) {
+    const line = metricsValid
+      ? `[research] run ${runId || job.id} completed; metrics accepted.`
+      : `[research] run ${runId || job.id} blocked: metrics.json missing/invalid (${metricsError}).`;
+    await channel.send(line);
+  }
+
+  if (
+    metricsValid &&
+    managerState.autoRun &&
+    managerState.status === "running" &&
+    session &&
+    session.research &&
+    session.research.enabled &&
+    session.auto &&
+    session.auto.research !== false
+  ) {
+    requestResearchAutoStep(conversationKey, channel, "job_completion");
+  }
 }
 
 function newPlanId() {
@@ -2552,99 +3858,115 @@ async function tickJobWatcher(watcher) {
   const { conversationKey, jobId, channelId } = watcher;
 
   try {
-    await enqueueConversation(conversationKey, async () => {
-      const session = getSession(conversationKey);
-      ensureJobsShape(session);
-      ensureTasksShape(session);
-      ensureTaskLoopShape(session);
+    const session = getSession(conversationKey);
+    ensureJobsShape(session);
+    ensureTasksShape(session);
+    ensureTaskLoopShape(session);
 
-      const job = (session.jobs || []).find((j) => j && typeof j === "object" && String(j.id || "") === String(jobId));
-      if (!job) {
-        await stopJobWatcher(conversationKey, jobId);
-        return;
+    const job = (session.jobs || []).find((j) => j && typeof j === "object" && String(j.id || "") === String(jobId));
+    if (!job) {
+      await stopJobWatcher(conversationKey, jobId);
+      return;
+    }
+
+    const exitRes = await readJobExitCode(job.exitCodePath);
+    const startedAtMs = Date.parse(job.startedAt || "") || Date.now();
+    const elapsed = formatElapsed(Date.now() - startedAtMs);
+    const tail = await readTailLines(job.logPath, watcher.tailLines, 128 * 1024);
+    const tailHash = crypto.createHash("sha1").update(tail).digest("hex").slice(0, 12);
+    const changed = watcher.lastTailHash !== tailHash;
+    watcher.lastTailHash = tailHash;
+
+    const ch = await resolveChannelForWatch(channelId);
+    const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})`;
+
+    if (exitRes.ok) {
+      // Finalization is intentionally out-of-queue so callback tasks still fire even if
+      // a foreground agent run in the same conversation is blocked or long-running.
+      const code = exitRes.code;
+      const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
+      const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
+      const runTasks = Boolean(watch && watch.runTasks);
+
+      job.exitCode = code;
+      if (job.status === "running") {
+        job.status = code === 0 ? "done" : "failed";
+      }
+      job.finishedAt = job.finishedAt || nowIso();
+      if (watch) watch.enabled = false;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await stopJobWatcher(conversationKey, jobId);
+
+      const lines = [];
+      lines.push(`${header} -> finished (exit ${code})`);
+      if (tail) {
+        lines.push("", "log tail:", tail);
+      }
+      if (ch) await sendLongToChannel(ch, lines.join("\n"));
+
+      try {
+        await handleResearchJobCompletion({
+          conversationKey,
+          session,
+          job,
+          exitCode: code,
+          channel: ch,
+        });
+      } catch (err) {
+        logRelayEvent("research.job.finalize.error", {
+          conversationKey,
+          jobId: job.id,
+          error: String(err && err.message ? err.message : err).slice(0, 240),
+        });
       }
 
-      const exitRes = await readJobExitCode(job.exitCodePath);
-      const startedAtMs = Date.parse(job.startedAt || "") || Date.now();
-      const elapsed = formatElapsed(Date.now() - startedAtMs);
-      const tail = await readTailLines(job.logPath, watcher.tailLines, 128 * 1024);
-      const tailHash = crypto.createHash("sha1").update(tail).digest("hex").slice(0, 12);
-      const changed = watcher.lastTailHash !== tailHash;
-      watcher.lastTailHash = tailHash;
-
-      const ch = await resolveChannelForWatch(channelId);
-      const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})`;
-
-      if (exitRes.ok) {
-        // Mark job finished.
-        const code = exitRes.code;
-        job.exitCode = code;
-        if (job.status === "running") {
-          job.status = code === 0 ? "done" : "failed";
+      if (thenTask) {
+        if (!CONFIG.tasksEnabled) {
+          if (ch) await ch.send("Job follow-up task requested, but tasks are disabled (RELAY_TASKS_ENABLED=false).");
+          return;
         }
-        job.finishedAt = job.finishedAt || nowIso();
-        if (job.watch && typeof job.watch === "object") {
-          job.watch.enabled = false;
+        const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
+        if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+          if (ch) await ch.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
+          return;
         }
+        const task = createTask(session, thenTask);
+        session.tasks.push(task);
         session.updatedAt = nowIso();
         await queueSaveState();
-        await stopJobWatcher(conversationKey, jobId);
+        logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
+        if (ch) await ch.send(`Queued follow-up task \`${task.id}\`.`);
 
-        const lines = [];
-        lines.push(`${header} -> finished (exit ${code})`);
-        if (tail) {
-          lines.push("", "log tail:", tail);
+        if (runTasks) {
+          await maybeStartTaskRunner(conversationKey, ch, session, {
+            isDm: !session.lastGuildId,
+            isThread: Boolean(ch && ch.isThread && ch.isThread()),
+          });
         }
-        if (ch) await sendLongToChannel(ch, lines.join("\n"));
-
-        // Integrate with /task as requested.
-        const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
-        const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
-        const runTasks = Boolean(watch && watch.runTasks);
-        if (thenTask) {
-          if (!CONFIG.tasksEnabled) {
-            if (ch) await ch.send("Job follow-up task requested, but tasks are disabled (RELAY_TASKS_ENABLED=false).");
-            return;
-          }
-          const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
-          if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
-            if (ch) await ch.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
-            return;
-          }
-          const task = createTask(session, thenTask);
-          session.tasks.push(task);
-          session.updatedAt = nowIso();
-          await queueSaveState();
-          logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
-          if (ch) await ch.send(`Queued follow-up task \`${task.id}\`.`);
-
-          if (runTasks) {
-            await maybeStartTaskRunner(conversationKey, ch, session, {
-              isDm: !session.lastGuildId,
-              isThread: Boolean(ch && ch.isThread && ch.isThread()),
-            });
-          }
-        }
-
-        return;
       }
+      return;
+    }
 
-      // Still running (best-effort).
-      if (job.status !== "running") job.status = "running";
+    // Still running (best-effort).
+    if (job.status !== "running") {
+      job.status = "running";
+      session.updatedAt = nowIso();
+      await queueSaveState();
+    }
 
-      if (!isPidRunning(job.pid) && !tail) {
-        // Wrapper ended but we don't have an exit_code yet; avoid spamming.
-        logRelayEvent("job.watch.warn", { conversationKey, jobId: job.id, pid: job.pid || null, note: "pid_not_running_and_no_exit_code" });
-        return;
-      }
+    if (!isPidRunning(job.pid) && !tail) {
+      // Wrapper ended but we don't have an exit_code yet; avoid spamming.
+      logRelayEvent("job.watch.warn", { conversationKey, jobId: job.id, pid: job.pid || null, note: "pid_not_running_and_no_exit_code" });
+      return;
+    }
 
-      if (!ch) return;
-      if (changed && tail) {
-        await sendLongToChannel(ch, [header, "", "log tail:", tail].join("\n"));
-      } else {
-        await ch.send(`${header} (no new output)`);
-      }
-    });
+    if (!ch) return;
+    if (changed && tail) {
+      await sendLongToChannel(ch, [header, "", "log tail:", tail].join("\n"));
+    } else {
+      await ch.send(`${header} (no new output)`);
+    }
   } catch (err) {
     logRelayEvent("job.watch.error", {
       conversationKey,
@@ -3179,9 +4501,11 @@ async function runAgentAndPostToDiscord({
       });
 
       let contextInjected = false;
+      let firstPrompt = null;
+      const runEnv = CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null;
       let result;
       try {
-        const firstPrompt = await buildAgentPrompt(session, userPrompt, {
+        firstPrompt = await buildAgentPrompt(session, userPrompt, {
           conversationKey,
           uploadDir,
           isDm,
@@ -3214,39 +4538,60 @@ async function runAgentAndPostToDiscord({
         result = await runAgent(
           session,
           firstPrompt.prompt,
-          CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
+          runEnv,
           (line) => progress.note(line),
           conversationKey
         );
       } catch (runErr) {
-        if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
-        const staleThreadId = session.threadId;
-        session.threadId = null;
-        session.updatedAt = nowIso();
-        await queueSaveState();
-        logRelayEvent("agent.run.retry_stale_session", {
-          conversationKey,
-          provider: CONFIG.agentProvider,
-          staleSessionId: staleThreadId,
-        });
-        progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
-        const retryPrompt = await buildAgentPrompt(session, userPrompt, {
-          conversationKey,
-          uploadDir,
-          isDm,
-          isThread,
-        });
-        contextInjected = contextInjected || retryPrompt.contextInjected;
-        result = await runAgent(
-          session,
-          retryPrompt.prompt,
-          CONFIG.uploadEnabled ? { RELAY_UPLOAD_DIR: uploadDir } : null,
-          (line) => progress.note(line),
-          conversationKey
-        );
-        result.text =
-          `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
-          (result.text || "");
+        if (CONFIG.agentProvider === "claude" && firstPrompt && isTransientClaudeInitError(runErr)) {
+          logRelayEvent("agent.run.retry_claude_init", {
+            conversationKey,
+            provider: CONFIG.agentProvider,
+            sessionId: session.threadId || null,
+          });
+          progress.note("Claude exited during init; retrying once");
+          try {
+            result = await runAgent(
+              session,
+              firstPrompt.prompt,
+              runEnv,
+              (line) => progress.note(line),
+              conversationKey
+            );
+          } catch (retryErr) {
+            runErr = retryErr;
+          }
+        }
+        if (!result) {
+          if (!session.threadId || !isStaleThreadResumeError(runErr)) throw runErr;
+          const staleThreadId = session.threadId;
+          session.threadId = null;
+          session.updatedAt = nowIso();
+          await queueSaveState();
+          logRelayEvent("agent.run.retry_stale_session", {
+            conversationKey,
+            provider: CONFIG.agentProvider,
+            staleSessionId: staleThreadId,
+          });
+          progress.note(`Session ${staleThreadId} could not be resumed; retrying in a new session`);
+          const retryPrompt = await buildAgentPrompt(session, userPrompt, {
+            conversationKey,
+            uploadDir,
+            isDm,
+            isThread,
+          });
+          contextInjected = contextInjected || retryPrompt.contextInjected;
+          result = await runAgent(
+            session,
+            retryPrompt.prompt,
+            runEnv,
+            (line) => progress.note(line),
+            conversationKey
+          );
+          result.text =
+            `Note: previous ${AGENT_LABEL} session \`${staleThreadId}\` could not be resumed, so I started a new session.\n\n` +
+            (result.text || "");
+        }
       }
 
       session.threadId = result.threadId || session.threadId;
@@ -3295,7 +4640,11 @@ async function runAgentAndPostToDiscord({
       }
 
       if (CONFIG.uploadEnabled && uploadPaths.length > 0) {
-        const { files, errors } = await resolveAndValidateUploads(conversationKey, uploadPaths);
+        const { files, errors } = await resolveAndValidateUploads(
+          conversationKey,
+          uploadPaths,
+          session.workdir || CONFIG.defaultWorkdir
+        );
         if (files.length > 0) {
           for (let i = 0; i < files.length; i += 10) {
             const batch = files.slice(i, i + 10);
@@ -4024,22 +5373,26 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/worktree <subcmd>` - manage git worktrees (list/new/use/rm/prune)",
         "`/plan <subcmd>` - manage plans (new/list/show/queue/apply)",
         "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
-        "`/auto <subcmd>` - per-conversation automation toggles (actions on|off)",
+        "`/research <subcmd>` - research manager (start/status/run/step/pause/stop/note)",
+        "`/auto <subcmd>` - per-conversation automation toggles (actions/research on|off)",
       ].join("\n")
     );
     return true;
   }
 
   if (command.name === "status") {
+    ensureResearchShape(session);
     const key = conversationKey || getConversationKey(message);
     const uploadDir = getConversationUploadDir(key);
     const sessionContextVersion = getSessionContextVersion(session);
+    const researchRoot = session.research && session.research.projectRoot ? String(session.research.projectRoot) : "";
     await message.reply(
       [
         `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
         `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
         `upload_dir: ${uploadDir}`,
         `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
+        `research: enabled=${Boolean(session.research && session.research.enabled)} auto=${Boolean(session.auto && session.auto.research)} project=${researchRoot || "none"}`,
       ].join("\n")
     );
     return true;
@@ -4087,6 +5440,7 @@ async function handleCommand(message, session, command, conversationKey) {
       const lines = [];
       lines.push("Usage:");
       lines.push("- `/auto actions on|off`");
+      lines.push("- `/auto research on|off`");
       lines.push("");
       lines.push(
         `agent_actions: enabled=${CONFIG.agentActionsEnabled} dm_only=${CONFIG.agentActionsDmOnly} allowed=${Array.from(
@@ -4095,26 +5449,230 @@ async function handleCommand(message, session, command, conversationKey) {
           .sort()
           .join(",") || "(none)"} max_per_message=${CONFIG.agentActionsMaxPerMessage}`
       );
+      lines.push(
+        `research_actions: enabled=${CONFIG.researchEnabled} dm_only=${CONFIG.researchDmOnly} allowed=${Array.from(
+          CONFIG.researchActionsAllowed || []
+        )
+          .sort()
+          .join(",") || "(none)"} max_per_step=${CONFIG.researchMaxActionsPerStep}`
+      );
       lines.push(`conversation_actions: ${session.auto && session.auto.actions ? "on" : "off"}`);
+      lines.push(`conversation_research: ${session.auto && session.auto.research ? "on" : "off"}`);
       await sendLongReply(message, lines.join("\n"));
       return true;
     }
-    if (sub !== "actions") {
-      await message.reply("Usage: `/auto actions on|off`");
+    if (sub !== "actions" && sub !== "research") {
+      await message.reply("Usage: `/auto actions on|off` or `/auto research on|off`");
       return true;
     }
     const mode = String(rest || "").trim().toLowerCase();
     if (mode !== "on" && mode !== "off") {
-      await message.reply("Usage: `/auto actions on|off`");
+      await message.reply("Usage: `/auto actions on|off` or `/auto research on|off`");
       return true;
     }
-    session.auto.actions = mode === "on";
+    if (sub === "actions") {
+      session.auto.actions = mode === "on";
+    } else {
+      session.auto.research = mode === "on";
+    }
     session.updatedAt = nowIso();
     await queueSaveState();
-    await message.reply(
-      `Conversation agent actions are now ${session.auto.actions ? "ON" : "OFF"}.` +
-        (CONFIG.agentActionsEnabled ? "" : " (Note: RELAY_AGENT_ACTIONS_ENABLED=false globally.)")
-    );
+    if (sub === "actions") {
+      await message.reply(
+        `Conversation agent actions are now ${session.auto.actions ? "ON" : "OFF"}.` +
+          (CONFIG.agentActionsEnabled ? "" : " (Note: RELAY_AGENT_ACTIONS_ENABLED=false globally.)")
+      );
+    } else {
+      await message.reply(
+        `Conversation research automation is now ${session.auto.research ? "ON" : "OFF"}.` +
+          (CONFIG.researchEnabled ? "" : " (Note: RELAY_RESEARCH_ENABLED=false globally.)")
+      );
+    }
+    return true;
+  }
+
+  if (command.name === "research") {
+    ensureAutoShape(session);
+    ensureResearchShape(session);
+    const isDm = !message.guildId;
+    const isThread = Boolean(message.channel && message.channel.isThread && message.channel.isThread());
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = (subRaw || "status").toLowerCase();
+
+    if (sub === "status") {
+      if (!session.research.enabled || !session.research.projectRoot) {
+        await sendLongReply(
+          message,
+          [
+            "Research manager: not started for this conversation.",
+            "Use: `/research start <goal...>`",
+            `global_enabled=${CONFIG.researchEnabled} dm_only=${CONFIG.researchDmOnly} project_root_error=${
+              CONFIG.researchProjectsRootError || "none"
+            }`,
+          ].join("\n")
+        );
+        return true;
+      }
+      const projectRoot = path.resolve(session.research.projectRoot);
+      const managerState = await loadResearchManagerState(projectRoot);
+      const lines = [
+        `project_root: ${projectRoot}`,
+        `status: ${managerState.status}`,
+        `phase: ${managerState.phase}`,
+        `auto_run: ${Boolean(managerState.autoRun)}`,
+        `steps: ${Number((managerState.counters && managerState.counters.steps) || 0)}/${Number(
+          (managerState.budgets && managerState.budgets.maxSteps) || 0
+        )}`,
+        `runs: ${Number((managerState.counters && managerState.counters.runs) || 0)}/${Number(
+          (managerState.budgets && managerState.budgets.maxRuns) || 0
+        )}`,
+        `active_job: ${(managerState.active && managerState.active.jobId) || "none"}`,
+        `active_run: ${(managerState.active && managerState.active.runId) || "none"}`,
+        `conversation_auto_research: ${Boolean(session.auto && session.auto.research)}`,
+        `last_decision_at: ${managerState.lastDecisionAt || "none"}`,
+      ];
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    const gate = shouldAllowResearchControl({
+      isDm,
+      session,
+      requireConversationToggle: sub === "run" || sub === "step",
+    });
+    if (!gate.ok) {
+      await message.reply(`Research manager blocked: ${gate.reason}`);
+      return true;
+    }
+
+    if (sub === "start") {
+      const goal = String(rest || "").trim();
+      if (!goal) {
+        await message.reply("Usage: `/research start <goal...>`");
+        return true;
+      }
+      const created = await ensureResearchProjectScaffold({
+        conversationKey,
+        goal,
+        channelId: message.channel && message.channel.id ? String(message.channel.id) : session.lastChannelId,
+        guildId: message.guildId ? String(message.guildId) : null,
+      });
+      session.research.enabled = true;
+      session.research.projectRoot = created.root;
+      session.research.slug = path.basename(created.root);
+      session.research.managerConvKey = managerConversationKeyFor(conversationKey);
+      session.research.lastNoteAt = null;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
+      await sendLongReply(
+        message,
+        [
+          `Research project created at: \`${created.root}\``,
+          "Next steps:",
+          "- `/research run` to start managed loop",
+          "- `/research step` to run exactly one manager iteration",
+          "- `/research note <text...>` to inject feedback",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    if (!session.research.enabled || !session.research.projectRoot) {
+      await message.reply("No active research project. Use `/research start <goal...>` first.");
+      return true;
+    }
+    const projectRoot = path.resolve(session.research.projectRoot);
+    const managerState = await loadResearchManagerState(projectRoot);
+
+    if (sub === "note") {
+      const note = String(rest || "").trim();
+      if (!note) {
+        await message.reply("Usage: `/research note <text...>`");
+        return true;
+      }
+      if (CONFIG.researchRequireNotePrefix && !/^feedback:/i.test(note)) {
+        await message.reply("This relay requires notes prefixed with `feedback:` (RELAY_RESEARCH_REQUIRE_NOTE_PREFIX=true).");
+        return true;
+      }
+      await appendResearchEvent(projectRoot, {
+        type: "user_feedback",
+        text: note,
+        author: message.author && message.author.id ? String(message.author.id) : "unknown",
+        messageId: message.id ? String(message.id) : null,
+      });
+      await appendResearchReportDigest(projectRoot, "Feedback", note);
+      session.research.lastNoteAt = nowIso();
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await message.reply("Research note recorded.");
+      return true;
+    }
+
+    if (sub === "pause") {
+      managerState.status = "paused";
+      managerState.autoRun = false;
+      await appendResearchEvent(projectRoot, { type: "research_paused", by: "user", reason: String(rest || "").trim() || null });
+      await saveResearchManagerState(projectRoot, managerState);
+      await message.reply("Research loop paused.");
+      return true;
+    }
+
+    if (sub === "stop") {
+      managerState.status = "done";
+      managerState.autoRun = false;
+      managerState.active = { jobId: null, runId: null };
+      await appendResearchEvent(projectRoot, { type: "research_stopped", by: "user", reason: String(rest || "").trim() || null });
+      await saveResearchManagerState(projectRoot, managerState);
+      session.research.enabled = false;
+      session.updatedAt = nowIso();
+      await queueSaveState();
+      await message.reply("Research loop stopped and marked done for this conversation.");
+      return true;
+    }
+
+    if (sub === "run") {
+      managerState.status = "running";
+      managerState.autoRun = true;
+      await appendResearchEvent(projectRoot, { type: "research_run_enabled", by: "user" });
+      await saveResearchManagerState(projectRoot, managerState);
+      const res = await runResearchManagerStep({
+        conversationKey,
+        session,
+        channel: message.channel,
+        isDm,
+        isThread,
+        trigger: "run",
+      });
+      const lines = [`Research run mode enabled.`, res.message || ""].filter(Boolean);
+      if (res.detailLines && res.detailLines.length) {
+        lines.push("", "Actions:", ...res.detailLines);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    if (sub === "step") {
+      const res = await runResearchManagerStep({
+        conversationKey,
+        session,
+        channel: message.channel,
+        isDm,
+        isThread,
+        trigger: "manual",
+      });
+      const lines = [res.message || (res.ok ? "Research step finished." : "Research step failed.")];
+      if (res.researchUpdate) {
+        lines.push("", "Research update:", res.researchUpdate);
+      }
+      if (res.detailLines && res.detailLines.length) {
+        lines.push("", "Actions:", ...res.detailLines);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    await message.reply("Usage: `/research start|status|run|step|pause|stop|note`");
     return true;
   }
 
@@ -4949,10 +6507,13 @@ async function main() {
       if (command) {
         // Step 3 robustness: refuse workdir/session control while task runner is active.
         if (isTaskRunnerActive(key, session)) {
+          const { head: researchSubRaw } = command.name === "research" ? splitFirstToken(command.arg) : { head: "" };
+          const researchSub = String(researchSubRaw || "").toLowerCase();
           const isDangerous =
             command.name === "workdir" ||
             command.name === "reset" ||
             command.name === "attach" ||
+            (command.name === "research" && researchSub !== "status" && researchSub !== "note") ||
             (command.name === "context" && command.arg.toLowerCase() === "reload");
           if (isDangerous) {
             await message.reply("Refusing while task runner is active. Run `/task stop` first.");
@@ -4972,14 +6533,19 @@ async function main() {
         // `/status` bypasses the queue so it always responds immediately, even if a long
         // agent run or /plan generation is in progress.
         if (command.name === "status") {
+          ensureResearchShape(session);
           const isRunning = queueByConversation.has(key);
           const uploadDir = getConversationUploadDir(key);
           const sessionContextVersion = getSessionContextVersion(session);
+          const researchRoot = session.research && session.research.projectRoot ? String(session.research.projectRoot) : "";
           const lines = [
             `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
             `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
             `upload_dir: ${uploadDir}`,
             `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
+            `research: enabled=${Boolean(session.research && session.research.enabled)} auto=${Boolean(
+              session.auto && session.auto.research
+            )} project=${researchRoot || "none"}`,
             `queue: ${isRunning ? "busy (request in progress)" : "idle"}`,
           ];
           await message.reply(lines.join("\n"));

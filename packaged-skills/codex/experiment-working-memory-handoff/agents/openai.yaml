@@ -1,4 +1,4 @@
 interface:
   display_name: "Experiment Working Memory + Handoff"
-  short_description: "Maintain working memory and handoff logs across experiment sessions"
-  default_prompt: "Use $experiment-working-memory-handoff to read existing working memory and handoff log at the start of each turn, then append timestamped evidence-backed updates to both after executing any checks or experiments."
+  short_description: "Maintain a compact living WORKING_MEMORY snapshot and an append-only HANDOFF_LOG with reproducible commands and evidence-backed results across experiment sessions"
+  default_prompt: "Use $experiment-working-memory-handoff. At the start of each turn: read WORKING_MEMORY (full) and the last ~50 lines of HANDOFF_LOG. At the end: append one new HANDOFF_LOG entry with commands run and artifact paths, then rewrite WORKING_MEMORY in-place as a compact snapshot (≤200 lines, no timestamped log blocks). Never append to WORKING_MEMORY; only append to HANDOFF_LOG."

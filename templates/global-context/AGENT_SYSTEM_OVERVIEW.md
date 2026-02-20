@@ -22,7 +22,7 @@ Both run on the same filesystem and can read/write shared project state.
 1. `/root/AGENTS.md` (global operating rules)
 2. `/root/AGENT_SYSTEM_OVERVIEW.md` (this quick summary)
 3. `/root/SYSTEM_SETUP_WORKING_MEMORY.md` (machine-level decisions and evidence)
-4. `/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` (latest operational handoff)
+4. `/root/HANDOFF_LOG.md` (latest operational handoff)
 
 ## Relay behavior (high level)
 - Conversations are scoped to allowed Discord guild/channel settings.
@@ -36,8 +36,8 @@ Both run on the same filesystem and can read/write shared project state.
 - Prefer functional explanations unless the user asks for deep implementation detail.
 - For system-level changes, append timestamped updates to:
   - `/root/SYSTEM_SETUP_WORKING_MEMORY.md`
-  - `/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`
-- Keep edits append-only in handoff/memory logs.
+  - `/root/HANDOFF_LOG.md`
+- Keep handoff logs append-only; keep working-memory files concise and current.
 
 ## Where to look next (if needed)
 - Relay operations and behavior: `/root/codex-discord-relay/README.md`

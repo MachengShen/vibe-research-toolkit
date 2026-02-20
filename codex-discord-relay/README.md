@@ -23,6 +23,7 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/worktree ...`
   - `/plan ...`
   - `/handoff ...`
+  - `/research ...`
   - `/auto ...`
   - `/help`
 
@@ -109,6 +110,7 @@ codex-discord-relay-multictl logs default
 - `/task ...` is a persistent per-conversation task queue with an auto-runner ("Ralph loop"). Tune with `RELAY_TASKS_ENABLED`, `RELAY_TASKS_MAX_PENDING`, `RELAY_TASKS_STOP_ON_ERROR`, `RELAY_TASKS_POST_FULL_OUTPUT`.
 - `/worktree ...` manages `git worktree` under `RELAY_WORKTREE_ROOT_DIR` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`).
 - Agent relay actions (jobs): when enabled, the agent can output a `[[relay-actions]]...[[/relay-actions]]` JSON block to ask the relay to start/watch/stop a long-running shell job. This is gated by `RELAY_AGENT_ACTIONS_*` (disabled by default; DM-only by default). Job logs are stored under `$RELAY_STATE_DIR/jobs/<conversationKey>/<jobId>/job.log`.
+- `/research ...` enables a guarded research control plane (disabled by default) with on-disk project state/events, a manager decision parser (`[[research-decision]]...[[/research-decision]]`), and fail-closed research-only action execution.
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - File uploads: Codex can ask the relay to upload a local file by including `[[upload:some-file.ext]]` in its response (or you can use `/upload some-file.ext`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`. Discord usually renders images inline and keeps text/PDF files downloadable.
@@ -141,6 +143,7 @@ Notes:
 - The relay removes the `[[relay-actions]]...[[/relay-actions]]` block before posting the agent's visible reply.
 - Actions are executed after posting, inside the per-conversation queue.
 - Watchers post periodic updates and can enqueue a follow-up `/task` when the job finishes.
+- Job-finish finalization (`exit_code` detection + `thenTask` enqueue) runs outside the normal conversation queue so callbacks still fire even if a foreground agent run is stuck.
 
 Controls:
 
@@ -171,6 +174,48 @@ Notes:
 - `/task add` is recommended for queue controls (`/task list`, `/task stop`) and repeatability.
 - You can also use plain natural-language prompting (without `/task`) if the agent emits valid `[[relay-actions]]` JSON.
 - `/auto actions on` is usually not needed if global actions are enabled and this conversation has not toggled actions off.
+
+## Research Manager
+
+Commands:
+
+- `/research start <goal...>`: scaffold a new research project under `RELAY_RESEARCH_PROJECTS_ROOT` and bind it to this conversation.
+- `/research status`: show phase/status/budgets/active run.
+- `/research run`: set status to running and execute one manager step.
+- `/research step`: execute exactly one manager step.
+- `/research pause`: pause the loop (`auto_run=false`).
+- `/research stop`: mark done and detach this conversation.
+- `/research note <text...>`: append deterministic user feedback event for the next manager step.
+
+Action-origin policy:
+
+- `[[relay-actions]]...[[/relay-actions]]` remains for normal agent outputs and is gated by `RELAY_AGENT_ACTIONS_*`.
+- `[[research-decision]]...[[/research-decision]]` is parsed **only** inside `/research` manager steps and gated by `RELAY_RESEARCH_*`.
+- Outside manager steps, research-decision blocks are ignored (fail-closed).
+
+Current v1 research actions:
+
+- `job_start`, `job_watch`, `job_stop`, `task_add`, `task_run`, `write_report`, `research_pause`, `research_mark_done`
+
+Artifact contract for research-launched runs:
+
+- Relay assigns `runId` and `runDir` under `exp/results/<runId>/`.
+- It exports `RUN_ID` and `RUN_DIR` into the job command.
+- It requires `metrics.json` in `runDir`; missing/invalid metrics block the loop.
+- It appends deterministic run records to `exp/registry.jsonl`.
+
+Env knobs:
+
+- `RELAY_RESEARCH_ENABLED=true|false` (default `false`)
+- `RELAY_RESEARCH_DM_ONLY=true|false` (default `true`)
+- `RELAY_RESEARCH_PROJECTS_ROOT=/abs/path` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`)
+- `RELAY_RESEARCH_DEFAULT_MAX_STEPS=<int>` (default `50`)
+- `RELAY_RESEARCH_DEFAULT_MAX_WALLCLOCK_MIN=<int>` (default `480`)
+- `RELAY_RESEARCH_DEFAULT_MAX_RUNS=<int>` (default `30`)
+- `RELAY_RESEARCH_ACTIONS_ALLOWED=...` (separate allowlist from relay actions)
+- `RELAY_RESEARCH_MAX_ACTIONS_PER_STEP=<int>` (default `12`)
+- `RELAY_RESEARCH_LEASE_TTL_SEC=<int>` (default `300`)
+- `RELAY_RESEARCH_REQUIRE_NOTE_PREFIX=true|false` (default `false`)
 
 ## Task Queue (Ralph Loop)
 
@@ -288,7 +333,7 @@ Controls:
 Example:
 
 ```bash
-RELAY_CONTEXT_FILE="/root/.codex-discord-relay/global-context.md;tail:docs/WORKING_MEMORY.md;tail:HANDOFF_LOG.md;tail:/root/SYSTEM_SETUP_WORKING_MEMORY.md;tail:/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt"
+RELAY_CONTEXT_FILE="/root/.codex-discord-relay/global-context.md;tail:docs/WORKING_MEMORY.md;tail:HANDOFF_LOG.md;tail:/root/SYSTEM_SETUP_WORKING_MEMORY.md;tail:/root/HANDOFF_LOG.md"
 RELAY_CONTEXT_MAX_CHARS=40000
 RELAY_CONTEXT_MAX_CHARS_PER_FILE=20000
 ```

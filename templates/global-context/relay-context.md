@@ -21,14 +21,14 @@ Both agents share the same filesystem at `/root`. Skills live in:
 
 ## Global Work Log Policy
 For any project with active experiments or ongoing work:
-- Read `<project-root>/HANDOFF_LOG.md` or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` at task start.
+- Read `<project-root>/HANDOFF_LOG.md` at task start.
 - If present, read `<project-root>/docs/WORKING_MEMORY.md` for the latest current-state snapshot.
 - Read `/root/SYSTEM_SETUP_WORKING_MEMORY.md` for machine-level infrastructure context.
 - Update memory artifacts after major actions and at task end:
-  - `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`) is append-only chronological history.
+  - `HANDOFF_LOG.md` is append-only chronological history.
   - `docs/WORKING_MEMORY.md` is a living snapshot and may be compacted or rewritten.
 - If you create a git commit in the project repo, record it in both files:
-  - append commit hash + subject + affected scope to `HANDOFF_LOG.md` (or `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`)
+  - append commit hash + subject + affected scope to `HANDOFF_LOG.md`
   - update `docs/WORKING_MEMORY.md` with the latest commit reference and its current significance
 - Append-only rules apply to handoff logs, not to working-memory snapshot files.
 
@@ -37,6 +37,7 @@ For any project with active experiments or ongoing work:
 - Config: `/root/.codex-discord-relay.env`
 - Logs: `/root/.codex-discord-relay/relay.log`
 - Restart: `codex-discord-relay-multictl restart default`
+- Job watcher callback note: job-finish finalization (`exit_code` -> `thenTask`) runs outside the normal conversation queue, so follow-up tasks can still enqueue even if a foreground run is stuck.
 
 ## Key Paths
 | Purpose | Path |
@@ -46,4 +47,4 @@ For any project with active experiments or ongoing work:
 | Relay config | `/root/.codex-discord-relay.env` |
 | Agent system overview | `/root/AGENT_SYSTEM_OVERVIEW.md` |
 | System working memory | `/root/SYSTEM_SETUP_WORKING_MEMORY.md` |
-| Global handoff log | `/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt` |
+| Global handoff log | `/root/HANDOFF_LOG.md` |

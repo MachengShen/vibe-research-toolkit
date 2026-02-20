@@ -14,11 +14,11 @@ Keep machine-level work consistent across sessions and agents by using the same 
 Before making system-level changes, read:
 
 - `/root/SYSTEM_SETUP_WORKING_MEMORY.md`
-- `/root/HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`
+- `/root/HANDOFF_LOG.md`
 
-If working in a repo, also read that repo's `HANDOFF_SUMMARY_FOR_NEXT_CODEX.txt`.
+If working in a repo, also read that repo's `HANDOFF_LOG.md`.
 
-After major actions, append concise updates to both:
+After major actions, update both:
 
 - `/root/SYSTEM_SETUP_WORKING_MEMORY.md`
 - relevant handoff log(s)
@@ -35,12 +35,16 @@ When wording seems similar but intent could differ:
 
 ## Required Logging Pattern
 
-Use append-only entries with:
+Use concise timestamped entries with:
 
 - absolute timestamp with timezone
 - objective and actions
 - exact run/log paths
 - current run state
+
+Memory role reminder:
+- handoff logs are append-only history
+- working-memory files are living snapshots and may be compacted/re-written
 
 ## References
 

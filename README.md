@@ -155,6 +155,8 @@ Global-context bootstrap toggles in `config/setup.env`:
 
 This repo bundles reusable local skills under:
 
+**Codex / Claude skills** (`packaged-skills/codex/`) — installed by `install_packaged_skills.sh`:
+
 - `packaged-skills/codex/codex-discord-relay-stuck-check`
 - `packaged-skills/codex/discord-image-upload`
 - `packaged-skills/codex/openclaw-media-send`
@@ -165,6 +167,11 @@ This repo bundles reusable local skills under:
 - `packaged-skills/codex/experiment-working-memory-handoff`
 - `packaged-skills/codex/gpu-training-takeover`
 - `packaged-skills/codex/ml-ablation-five-step-loop`
+
+**OpenClaw-specific skills** (`packaged-skills/openclaw/`) — require OpenClaw's `sessions_spawn` API or OpenClaw skill config; not installed by default:
+
+- `packaged-skills/openclaw/delegate-coding-tasks`
+- `packaged-skills/openclaw/tavily-search`
 
 Install/update bundled skills with one command:
 

@@ -25,6 +25,8 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/handoff ...`
   - `/research ...`
   - `/auto ...`
+  - `/go ...`
+  - `/overnight ...`
   - `/help`
 
 ## Setup
@@ -111,6 +113,8 @@ codex-discord-relay-multictl logs default
 - `/worktree ...` manages `git worktree` under `RELAY_WORKTREE_ROOT_DIR` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`).
 - Agent relay actions (jobs): when enabled, the agent can output a `[[relay-actions]]...[[/relay-actions]]` JSON block to ask the relay to start/watch/stop a long-running shell job. This is gated by `RELAY_AGENT_ACTIONS_*` (disabled by default; DM-only by default). Job logs are stored under `$RELAY_STATE_DIR/jobs/<conversationKey>/<jobId>/job.log`.
 - `/research ...` enables a guarded research control plane (disabled by default) with on-disk project state/events, a manager decision parser (`[[research-decision]]...[[/research-decision]]`), and fail-closed research-only action execution.
+- `/go ...` is a task macro: queue a task + memory/handoff update task and run immediately.
+- `/overnight ...` is a research macro: one command to start/status/stop unattended research loops.
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - File uploads: Codex can ask the relay to upload a local file by including `[[upload:some-file.ext]]` in its response (or you can use `/upload some-file.ext`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`. Discord usually renders images inline and keeps text/PDF files downloadable.
@@ -186,6 +190,9 @@ Commands:
 - `/research pause`: pause the loop (`auto_run=false`).
 - `/research stop`: mark done and detach this conversation.
 - `/research note <text...>`: append deterministic user feedback event for the next manager step.
+- `/overnight start <goal...>`: start/resume unattended research mode with defaults and run first step.
+- `/overnight status`: quick status alias for overnight mode.
+- `/overnight stop`: pause unattended research mode safely.
 
 Action-origin policy:
 
@@ -212,9 +219,15 @@ Env knobs:
 - `RELAY_RESEARCH_DEFAULT_MAX_STEPS=<int>` (default `50`)
 - `RELAY_RESEARCH_DEFAULT_MAX_WALLCLOCK_MIN=<int>` (default `480`)
 - `RELAY_RESEARCH_DEFAULT_MAX_RUNS=<int>` (default `30`)
+- `RELAY_RESEARCH_TICK_SEC=<int>` (default `30`)
+- `RELAY_RESEARCH_TICK_MAX_PARALLEL=<int>` (default `2`)
 - `RELAY_RESEARCH_ACTIONS_ALLOWED=...` (separate allowlist from relay actions)
 - `RELAY_RESEARCH_MAX_ACTIONS_PER_STEP=<int>` (default `12`)
 - `RELAY_RESEARCH_LEASE_TTL_SEC=<int>` (default `300`)
+- `RELAY_RESEARCH_INFLIGHT_TTL_SEC=<int>` (default `900`)
+- `RELAY_RESEARCH_POST_ON_APPLIED=true|false` (default `true`)
+- `RELAY_RESEARCH_POST_ON_BLOCKED=true|false` (default `true`)
+- `RELAY_RESEARCH_POST_EVERY_STEPS=<int>` (default `5`)
 - `RELAY_RESEARCH_REQUIRE_NOTE_PREFIX=true|false` (default `false`)
 
 ## Task Queue (Ralph Loop)

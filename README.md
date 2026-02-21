@@ -103,6 +103,9 @@ ls -la "${CODEX_HOME:-$HOME/.codex}/skills"
 # Full verification:
 bash ./scripts/verify_install.sh
 
+# Repository lint (syntax + packaged skills metadata):
+bash ./scripts/lint_repo.sh
+
 # Export current host settings into repo snapshot (safe/redacted):
 bash ./scripts/export_local_state.sh --no-secrets
 
@@ -270,6 +273,20 @@ Use this for "start now, analyze later" training jobs from Discord.
 Notes:
 - `/task add` is recommended for queue control (`/task list`, `/task stop`), but plain natural-language prompting can also work if the agent emits valid `[[relay-actions]]` JSON.
 - `/auto actions on` is usually unnecessary if global relay actions are already enabled and this conversation did not disable them.
+
+## GPU Queue Gate Script
+
+For shared single-GPU hosts, use the bundled queue gate wrapper to serialize runs:
+
+```bash
+bash ./scripts/gpu_gate.sh -n experiment_a -t 6h -- \
+  python train.py --config configs/exp_a.yaml
+```
+
+Behavior:
+- Uses a lock file (default `/tmp/codex_gpu0.lock`) so only one job runs at a time.
+- Writes run logs to `/root/gpu-queue-logs` by default (override with `--log-dir` or `GPU_GATE_LOG_DIR`).
+- Enforces timeout (`-t/--timeout`) and emits structured status lines (`status`, `exit_code`, `log`).
 
 ## Notes
 

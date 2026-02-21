@@ -17,6 +17,7 @@ Follow this skill when taking over ongoing ML training work mid-stream. Avoids c
    - Confirm working directory and config paths (absolute vs. relative) are correct for this project.
 3. **Launch through the project's queue gate.**
    - Use whatever job queue/lock wrapper the project provides with an explicit job name and timeout.
+   - In this toolkit, prefer `scripts/gpu_gate.sh -n <job_name> -t <timeout> -- <command...>`.
    - Use absolute config and Python paths.
 4. **Monitor with cadence matched to run length.**
    - Startup/resume: check every 5–20 epochs.

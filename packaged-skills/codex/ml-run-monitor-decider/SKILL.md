@@ -1,6 +1,6 @@
 ---
 name: ml-run-monitor-decider
-description: "Use when the user asks to launch ML experiments and continuously monitor progress, analyze log trends, and make iterative stop/go decisions. Best for queued GPU training runs with epoch-summary logs and controlled ablations."
+description: "Use when launching and monitoring ML runs with checkpoint-based decisions; must report latest metrics, explicit continue/stop/branch decision, and exact next command or config change."
 ---
 
 # ML Run Monitor Decider

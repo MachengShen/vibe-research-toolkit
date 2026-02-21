@@ -1,6 +1,6 @@
 ---
 name: experiment-working-memory-handoff
-description: Use for iterative experiments/investigations where continuity matters across turns/sessions. Maintain a compact living WORKING_MEMORY snapshot plus an append-only HANDOFF_LOG, updated with evidence-backed results and runnable next steps after every meaningful change.
+description: Use when iterative experiments need cross-session continuity; must append evidence-backed updates to HANDOFF_LOG.md and refresh docs/WORKING_MEMORY.md with current state, active hypothesis, and runnable next steps.
 version: 2.2
 ---
 

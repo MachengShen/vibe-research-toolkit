@@ -1,6 +1,6 @@
 ---
 name: relay-long-task-callback
-description: Use when a task should launch a long-running background job (training/eval/sweep), watch progress, and automatically enqueue a follow-up analysis task when the job finishes.
+description: Use when a task needs unattended background execution; must emit one valid [[relay-actions]] job_start block with watch.everySec/tailLines/thenTask/runTasks=true so follow-up analysis auto-runs.
 ---
 
 # Relay Long Task Callback

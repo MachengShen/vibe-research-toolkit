@@ -41,6 +41,6 @@ Both run on the same filesystem and can read/write shared project state.
 
 ## Where to look next (if needed)
 - Relay operations and behavior: `/root/codex-discord-relay/README.md`
-- Replication toolkit: `/root/openclaw-codex-discord-skills-kit/README.md`
+- Replication toolkit: `/root/VibeResearch_toolkit/README.md`
 - Runtime config: `/root/.codex-discord-relay.env`
 - Runtime logs: `/root/.codex-discord-relay/relay.log`

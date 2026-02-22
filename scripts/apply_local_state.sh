@@ -5,8 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/common.sh"
 
-require_root
-
 INPUT_DIR="${OPENCLAW_STATE_SYNC_INPUT_DIR:-$ROOT_DIR/machine-state}"
 WITH_SECRETS="${OPENCLAW_STATE_SYNC_INCLUDE_SECRETS:-false}"
 BACKUP_DIR="${OPENCLAW_STATE_SYNC_BACKUP_DIR:-/root/.openclaw-kit-backups/state-$(date +%Y%m%d-%H%M%S)}"
@@ -109,6 +107,8 @@ done
 
 WITH_SECRETS="$(bool_normalize "$WITH_SECRETS")"
 [[ -d "$INPUT_DIR" ]] || die "missing snapshot dir: $INPUT_DIR"
+
+require_root
 
 log "apply local state from $INPUT_DIR (with_secrets=$WITH_SECRETS dry_run=$DRY_RUN)"
 log "backup dir: $BACKUP_DIR"

@@ -133,6 +133,28 @@ function parseToolList(value) {
     .filter(Boolean);
 }
 
+function buildChildProcessEnv(extraEnv) {
+  const env = { ...process.env };
+
+  // Prevent nested Claude CLI launches when relay itself was started from within
+  // a Claude Code session (for example after an in-chat restart).
+  delete env.CLAUDECODE;
+  for (const k of Object.keys(env)) {
+    if (k.startsWith("CLAUDECODE_")) delete env[k];
+  }
+
+  if (extraEnv && typeof extraEnv === "object") {
+    for (const [k, v] of Object.entries(extraEnv)) {
+      if (v == null) {
+        delete env[k];
+      } else {
+        env[k] = String(v);
+      }
+    }
+  }
+  return env;
+}
+
 function normalizeAgentProvider(value) {
   const v = String(value || "codex").trim().toLowerCase();
   return v === "claude" ? "claude" : "codex";
@@ -2256,7 +2278,7 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /research, /auto, /go, /overnight.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /research, /auto, /go, /overnight, /job.",
     "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
     "- If you need to launch a long-running shell job and watch it, you may request relay actions via a JSON block:",
@@ -2351,8 +2373,7 @@ function buildCodexArgsStateless(workdir, prompt, { sandboxMode = "read-only" } 
 }
 
 async function runCodexWithArgs(args, { cwd, extraEnv, onProgress, conversationKey, label }) {
-  const env =
-    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
+  const env = buildChildProcessEnv(extraEnv);
   const child = spawn(CONFIG.codexBin, args, { cwd, env });
   if (conversationKey) activeChildByConversation.set(conversationKey, child);
 
@@ -2485,8 +2506,7 @@ function waitForChildExit(child, label, conversationKey = null) {
 
 async function runCodex(session, prompt, extraEnv, onProgress, conversationKey) {
   const args = buildCodexArgs(session, prompt);
-  const env =
-    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
+  const env = buildChildProcessEnv(extraEnv);
   const child = spawn(CONFIG.codexBin, args, {
     cwd: session.workdir || CONFIG.defaultWorkdir,
     env,
@@ -2644,8 +2664,7 @@ function extractClaudeTextFromJson(parsed, fallbackText) {
 async function runClaude(session, prompt, extraEnv, onProgress, conversationKey, options = {}) {
   const selectedModel = resolveClaudeModel(options && options.modelOverride ? options.modelOverride : "");
   const args = buildClaudeArgs(session, prompt, selectedModel);
-  const env =
-    extraEnv && typeof extraEnv === "object" ? { ...process.env, ...extraEnv } : process.env;
+  const env = buildChildProcessEnv(extraEnv);
   const child = spawn(CONFIG.claudeBin, args, {
     cwd: session.workdir || CONFIG.defaultWorkdir,
     env,
@@ -6691,6 +6710,7 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
         "`/research <subcmd>` - research manager (start/status/run/step/pause/stop/note)",
         "`/auto <subcmd>` - per-conversation automation toggles (actions/research on|off)",
+        "`/job <subcmd>` - view background jobs (list/logs [id])",
         "`/go <task...>` - queue and run immediately (long-run requests auto-wrap into job_start/watch callback mode)",
         "`/overnight <start|status|stop>` - one-command research loop control",
       ].join("\n")

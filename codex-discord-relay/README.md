@@ -102,6 +102,8 @@ codex-discord-relay-multictl logs default
 
 - `RELAY_AGENT_PROVIDER=codex|claude` selects the backend.
 - `RELAY_AGENT_TIMEOUT_MS` controls max runtime per agent call (default `600000` ms, set `0` to disable).
+- `RELAY_CODEX_TRANSIENT_RETRY_ENABLED=true|false` controls one-shot retry for likely transient Codex failures (default `true`).
+- `RELAY_CODEX_TRANSIENT_RETRY_MAX=<int>` controls max transient retries for Codex (`0..3`, default `1`).
 - `CLAUDE_PERMISSION_MODE=acceptEdits` is recommended when relay runs as root.
 - `CLAUDE_ALLOWED_TOOLS` can pre-allow specific Claude tools (comma or space separated) to avoid interactive approval prompts in relay flows.
 - Agent context bootstrap is enabled by default. The relay injects runtime context into prompts so agents know they are replying via Discord and can request uploads with `[[upload:...]]`.
@@ -113,9 +115,10 @@ codex-discord-relay-multictl logs default
 - `/worktree ...` manages `git worktree` under `RELAY_WORKTREE_ROOT_DIR` (must be inside `CODEX_ALLOWED_WORKDIR_ROOTS`).
 - Agent relay actions (jobs): when enabled, the agent can output a `[[relay-actions]]...[[/relay-actions]]` JSON block to ask the relay to start/watch/stop a long-running shell job. This is gated by `RELAY_AGENT_ACTIONS_*` (disabled by default; DM-only by default). Job logs are stored under `$RELAY_STATE_DIR/jobs/<conversationKey>/<jobId>/job.log`.
 - `/research ...` enables a guarded research control plane (disabled by default) with on-disk project state/events, a manager decision parser (`[[research-decision]]...[[/research-decision]]`), and fail-closed research-only action execution.
-- `/go ...` is a task macro: queue a task + memory/handoff update task and run immediately.
+- `/go ...` is a task macro: queue and run immediately. Long-run intents (train/sweep/ablation/eval/experiment keywords) auto-wrap into a `job_start` + watcher callback task, while non-long tasks keep the task + handoff-update behavior.
 - `/overnight ...` is a research macro: one command to start/status/stop unattended research loops.
 - The relay edits the initial `Running ...` message with human-readable intermediate progress (see `RELAY_PROGRESS*` env vars).
+- If the relay process restarts mid-run, it now marks the run as interrupted and posts a terminal interruption status instead of leaving a silent dangling "Running ..." line.
 - `DISCORD_ALLOWED_CHANNELS` is matched against the thread parent channel as well, so threads created under an allowed channel work without adding each thread id.
 - File uploads: Codex can ask the relay to upload a local file by including `[[upload:some-file.ext]]` in its response (or you can use `/upload some-file.ext`). Files are resolved relative to the per-conversation `upload_dir` shown by `/status`. Discord usually renders images inline and keeps text/PDF files downloadable.
 - Incoming text attachments: when you attach a small text file in Discord (e.g. `.md`, `.txt`, `.json`), the relay downloads it into `<upload_dir>/attachments/` and appends its contents to the prompt automatically. Tune with `RELAY_DISCORD_ATTACHMENTS_*`.
@@ -133,9 +136,11 @@ Marker syntax (agent output):
 [[relay-actions]]
 {"actions":[
   {"type":"job_start",
+   "description":"Train maze2d EBM sweep (seed 1/3)",
    "command":"python train.py --config cfg.yaml",
-   "watch":{"everySec":300,"tailLines":50,
+   "watch":{"everySec":300,"tailLines":20,
             "thenTask":"Analyze results and write a short report in HANDOFF_LOG.md",
+            "thenTaskDescription":"Analyze final metrics + failures for seed 1/3",
             "runTasks":true}
   }
 ]}
@@ -147,6 +152,8 @@ Notes:
 - The relay removes the `[[relay-actions]]...[[/relay-actions]]` block before posting the agent's visible reply.
 - Actions are executed after posting, inside the per-conversation queue.
 - Watchers post periodic updates and can enqueue a follow-up `/task` when the job finishes.
+- Default watcher output is compact (summary + output delta) and suppresses no-change spam.
+- `job_start.description` and `watch.thenTaskDescription` are optional but recommended so progress updates stay readable.
 - Job-finish finalization (`exit_code` detection + `thenTask` enqueue) runs outside the normal conversation queue so callbacks still fire even if a foreground agent run is stuck.
 
 Controls:
@@ -162,6 +169,15 @@ Env knobs:
 - `RELAY_JOBS_AUTO_WATCH=true|false` (default `true` only if actions enabled)
 - `RELAY_JOBS_AUTO_WATCH_EVERY_SEC=<int>` (default `300`)
 - `RELAY_JOBS_AUTO_WATCH_TAIL_LINES=<int>` (default `50`)
+- `RELAY_JOBS_WATCH_COMPACT=true|false` (default `true`)
+- `RELAY_JOBS_WATCH_POST_NO_CHANGE=true|false` (default `false`)
+- `RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_CHANGE=true|false` (default `false`)
+- `RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_FINISH=true|false` (default `false`)
+- `RELAY_JOBS_WATCH_COMPACT_TAIL_LINES=<int>` (default `3`)
+- `RELAY_JOBS_WATCH_COMPACT_TAIL_MAX_CHARS=<int>` (default `600`)
+- `RELAY_GO_AUTOWRAP_LONG_TASKS=true|false` (default `true`)
+- `RELAY_GO_LONG_TASK_WATCH_EVERY_SEC=<int>` (default `120`)
+- `RELAY_GO_LONG_TASK_TAIL_LINES=<int>` (default `80`)
 
 ### Recommended Long-Run Callback Flow
 
@@ -170,7 +186,7 @@ Use this when you want the agent to launch training, keep running in background,
 1. Set repo workdir:
    - `/workdir /root/<repo>`
 2. Queue a task with explicit skill invocation:
-   - `/task add Use skill relay-long-task-callback. Launch <training command>. Watch everySec=120 tailLines=80. thenTask="Analyze final log <path> and summarize metrics + next steps."`
+   - `/task add Use skill relay-long-task-callback. Launch <training command>. Watch everySec=120 tailLines=20. thenTask="Analyze final log <path> and summarize metrics + next steps."`
 3. Start runner:
    - `/task run`
 
@@ -387,3 +403,4 @@ Frequent causes:
 - Old Node runtime: `Cannot find module 'node:fs'` or `node:fs/promises`.
 - Hung Codex child run (Codex mode) blocks that conversation queue until process exits or relay restarts.
 - Timeout too low for long prompts: if you see `codex timeout ...` or `claude timeout ...`, increase `RELAY_AGENT_TIMEOUT_MS`.
+- Intermittent VPN/proxy/API issues can surface as `codex exit 1` with sparse detail; keep transient retry enabled and inspect relay status summaries for "likely transient connectivity/proxy issue".

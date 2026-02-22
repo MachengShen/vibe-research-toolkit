@@ -5,8 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/common.sh"
 
-require_root
-
 usage() {
   cat <<'USAGE'
 Usage: bootstrap.sh [options]
@@ -114,6 +112,8 @@ EXPORT_SNAPSHOT_ON_BOOTSTRAP="$(bool_normalize "$EXPORT_SNAPSHOT_ON_BOOTSTRAP")"
 SYNC_LOCAL_SKILLS_ON_BOOTSTRAP="$(bool_normalize "$SYNC_LOCAL_SKILLS_ON_BOOTSTRAP")"
 INSTALL_GLOBAL_CONTEXT="$(bool_normalize "$INSTALL_GLOBAL_CONTEXT")"
 GLOBAL_CONTEXT_OVERWRITE="$(bool_normalize "$GLOBAL_CONTEXT_OVERWRITE")"
+
+require_root
 
 state_secret_flag="--no-secrets"
 if [[ "$STATE_SYNC_INCLUDE_SECRETS" == "true" ]]; then

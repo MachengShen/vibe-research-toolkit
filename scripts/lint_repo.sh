@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 failures=0
+mapfile -d '' -t shell_files < <(find . -type f -name '*.sh' -not -path './.git/*' -print0 | sort -z)
+mapfile -d '' -t js_files < <(find . -type f -name '*.js' -not -path './.git/*' -print0 | sort -z)
 
 log() {
   printf '[lint] %s\n' "$*"
@@ -21,6 +23,36 @@ run_check() {
   log "$label"
   if ! "$@"; then
     fail "$label"
+  fi
+}
+
+check_no_crlf() {
+  local file="$1"
+  if LC_ALL=C grep -q $'\r' "$file"; then
+    fail "CRLF line endings detected: ${file#./}"
+  fi
+}
+
+check_bash_header() {
+  local file="$1"
+  local line1 line2
+  line1="$(sed -n '1p' "$file")"
+  line2="$(sed -n '2p' "$file")"
+
+  if [[ "$line1" != "#!/usr/bin/env bash" ]]; then
+    fail "invalid bash shebang in ${file#./}: '$line1'"
+  fi
+  if [[ "$line2" != "set -euo pipefail" ]]; then
+    fail "missing strict mode second line in ${file#./}: '$line2'"
+  fi
+}
+
+check_js_shebang() {
+  local file="$1"
+  local line1
+  line1="$(sed -n '1p' "$file")"
+  if [[ "$line1" == '#!'* && "$line1" != "#!/usr/bin/env node" ]]; then
+    fail "invalid node shebang in ${file#./}: '$line1'"
   fi
 }
 
@@ -67,15 +99,29 @@ check_skill_frontmatter() {
 run_check "node --check codex-discord-relay/relay.js" node --check codex-discord-relay/relay.js
 run_check "bash -n bootstrap.sh" bash -n bootstrap.sh
 
-for script in scripts/*.sh; do
-  run_check "bash -n ${script}" bash -n "$script"
+if [[ "${#shell_files[@]}" -eq 0 ]]; then
+  fail "no shell scripts found"
+fi
+if [[ "${#js_files[@]}" -eq 0 ]]; then
+  fail "no JavaScript files found"
+fi
+
+for script in "${shell_files[@]}"; do
+  run_check "bash -n ${script#./}" bash -n "$script"
+  check_bash_header "$script"
+  check_no_crlf "$script"
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-  run_check "shellcheck bootstrap.sh scripts/*.sh" shellcheck bootstrap.sh scripts/*.sh
+  run_check "shellcheck ${#shell_files[@]} shell script(s)" shellcheck "${shell_files[@]}"
 else
   log "shellcheck not found; skipping shellcheck checks"
 fi
+
+for script in "${js_files[@]}"; do
+  check_js_shebang "$script"
+  check_no_crlf "$script"
+done
 
 if [[ -d packaged-skills/codex ]]; then
   while IFS= read -r -d '' skill_dir; do

@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_REPO_DIR="/root/openclaw-codex-discord-skills-kit"
-if [[ ! -d "$DEFAULT_REPO_DIR/.git" && -d "/root/openclaw-codex-discord-kit/.git" ]]; then
-  DEFAULT_REPO_DIR="/root/openclaw-codex-discord-kit"
+DEFAULT_REPO_DIR="/root/VibeResearch_toolkit"
+if [[ ! -d "$DEFAULT_REPO_DIR/.git" ]]; then
+  if [[ -d "/root/openclaw-codex-discord-skills-kit/.git" ]]; then
+    DEFAULT_REPO_DIR="/root/openclaw-codex-discord-skills-kit"
+  elif [[ -d "/root/openclaw-codex-discord-kit/.git" ]]; then
+    DEFAULT_REPO_DIR="/root/openclaw-codex-discord-kit"
+  fi
 fi
 KIT_REPO_DIR="${OPENCLAW_KIT_REPO_DIR:-$DEFAULT_REPO_DIR}"
 PROXY_ENV_FILE="${OPENCLAW_PROXY_ENV_FILE:-/root/.openclaw/proxy.env}"

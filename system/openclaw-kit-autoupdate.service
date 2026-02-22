@@ -7,8 +7,7 @@ After=network-online.target
 Type=oneshot
 User=root
 Group=root
-Environment=OPENCLAW_KIT_REPO_DIR=/root/openclaw-codex-discord-kit
+Environment=OPENCLAW_KIT_REPO_DIR=/root/VibeResearch_toolkit
 Environment=OPENCLAW_PROXY_ENV_FILE=/root/.openclaw/proxy.env
 Environment=OPENCLAW_KIT_AUTOUPDATE_LOG=/var/log/openclaw-kit-autoupdate.log
 ExecStart=/usr/local/bin/openclaw-kit-autoupdate.sh
-

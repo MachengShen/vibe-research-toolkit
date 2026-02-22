@@ -49,7 +49,7 @@ For machine-level setup, infrastructure, relay/runtime, or cross-repo environmen
 | Purpose | Path |
 |---|---|
 | Skills (canonical) | `/root/.agents/skills/` |
-| Skills kit repo | `/root/openclaw-codex-discord-skills-kit/` |
+| Skills kit repo | `/root/VibeResearch_toolkit/` |
 | Relay config | `/root/.codex-discord-relay.env` |
 | Agent system overview | `/root/AGENT_SYSTEM_OVERVIEW.md` |
 | System working memory | `/root/SYSTEM_SETUP_WORKING_MEMORY.md` |

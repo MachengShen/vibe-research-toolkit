@@ -1,0 +1,26 @@
+id: ablation_lr
+description: "Learning-rate ablation run"
+command:
+  - python3
+  - train.py
+  - --config
+  - "{config}"
+  - --seed
+  - "{seed}"
+  - --lr
+  - "{lr}"
+  - --out
+  - "{out_dir}"
+primary_metric:
+  name: val_loss
+  higher_is_better: false
+defaults:
+  seed: 0
+  config: cfg.yaml
+  lr: 0.0003
+watch:
+  everySec: 300
+  tailLines: 50
+artifacts:
+  metrics: "{run_dir}/metrics.json"
+  log: "{run_dir}/train.log"

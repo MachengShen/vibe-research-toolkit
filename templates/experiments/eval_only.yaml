@@ -1,0 +1,26 @@
+id: eval_only
+description: "Evaluation-only run from a checkpoint"
+command:
+  - python3
+  - eval.py
+  - --config
+  - "{config}"
+  - --checkpoint
+  - "{checkpoint}"
+  - --seed
+  - "{seed}"
+  - --out
+  - "{out_dir}"
+primary_metric:
+  name: eval_score
+  higher_is_better: true
+defaults:
+  seed: 0
+  config: cfg.yaml
+  checkpoint: ckpt/latest.pt
+watch:
+  everySec: 180
+  tailLines: 80
+artifacts:
+  metrics: "{run_dir}/metrics.json"
+  log: "{run_dir}/train.log"

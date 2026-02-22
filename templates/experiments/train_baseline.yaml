@@ -1,0 +1,23 @@
+id: train_baseline
+description: "Baseline training run"
+command:
+  - python3
+  - train.py
+  - --config
+  - "{config}"
+  - --seed
+  - "{seed}"
+  - --out
+  - "{out_dir}"
+primary_metric:
+  name: val_loss
+  higher_is_better: false
+defaults:
+  seed: 0
+  config: cfg.yaml
+watch:
+  everySec: 300
+  tailLines: 50
+artifacts:
+  metrics: "{run_dir}/metrics.json"
+  log: "{run_dir}/train.log"

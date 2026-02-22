@@ -1,7 +1,7 @@
 ---
 name: relay-long-task-callback
 description: Use when a task needs unattended background execution; must emit one valid [[relay-actions]] job_start block with watch.everySec/tailLines/thenTask/runTasks=true so follow-up analysis auto-runs.
-version: 1.0
+version: 1.1
 ---
 
 # Relay Long Task Callback
@@ -38,6 +38,27 @@ If required information is missing, do not guess critical paths or commands. Ret
 - Ensure the command writes logs deterministically so follow-up analysis can inspect them.
 - In `thenTask`, include exact log paths, run ids, and metrics to extract.
 - Keep surrounding prose short to avoid drowning the action block.
+
+## Research Run Profile (ML training/eval)
+
+When the task is an ML experiment, the action block should enforce the run contract:
+
+1. Allocate `run_id` and `run_dir` under `exp/results/`.
+2. Launch the command through `scripts/vr_run.sh`:
+   - `scripts/vr_run.sh --run-id <run_id> --run-dir <run_dir> -- <train/eval command>`
+3. Ensure `metrics.json` is generated and validated.
+4. Set `watch.thenTask` to run post-run automation steps:
+   - `python3 tools/exp/validate_metrics.py <run_dir>/metrics.json`
+   - `python3 tools/exp/append_registry.py --registry exp/registry.jsonl --run-dir <run_dir>`
+   - `python3 tools/exp/summarize_run.py --run-dir <run_dir> --out-md reports/rolling_report.md --append`
+   - update `HANDOFF_LOG.md` and `docs/WORKING_MEMORY.md` using experiment-working-memory-handoff
+   - compare with current best run and propose the next discriminating experiment
+
+### Suggested `thenTask` phrasing
+
+```text
+Validate <run_dir>/metrics.json, append the run to exp/registry.jsonl, append a markdown run summary to reports/rolling_report.md, update HANDOFF_LOG.md and docs/WORKING_MEMORY.md with evidence paths, compare against the current best run, and propose one next experiment command.
+```
 
 ## Ready-To-Use Task Text
 

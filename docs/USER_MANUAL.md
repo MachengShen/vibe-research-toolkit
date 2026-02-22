@@ -109,6 +109,42 @@ Benefits:
 - deterministic callback task with explicit analysis goals
 - continuity even if conversation queue is busy
 
+## 6A) ML automation package (run wrapper + registry)
+
+The toolkit now includes a standard run contract for research experiments:
+
+- Wrapper: `scripts/vr_run.sh`
+- Metrics schema: `tools/exp/metrics_schema.json`
+- Validator: `tools/exp/validate_metrics.py`
+- Registry append tool: `tools/exp/append_registry.py`
+- Summary tool: `tools/exp/summarize_run.py`
+- Templates: `templates/experiments/*.yaml`
+
+Each run should produce:
+- `exp/results/<run_id>/meta.json`
+- `exp/results/<run_id>/metrics.json`
+- `exp/results/<run_id>/train.log`
+- `exp/results/<run_id>/artifacts/`
+
+Example wrapper usage:
+
+```bash
+scripts/vr_run.sh --run-id rtest --run-dir exp/results/rtest -- \
+  python3 train.py --config cfg.yaml --seed 0
+```
+
+Post-run checks:
+
+```bash
+python3 tools/exp/validate_metrics.py exp/results/rtest/metrics.json
+python3 tools/exp/append_registry.py --registry exp/registry.jsonl --run-dir exp/results/rtest
+python3 tools/exp/summarize_run.py --run-dir exp/results/rtest --out-md reports/rolling_report.md --append
+```
+
+Registry behavior:
+- `exp/registry.jsonl` is append-only.
+- duplicate `run_id` is rejected by default (fail-closed).
+
 ## 7) Features designed for ML researchers
 
 ### Your requested highlights

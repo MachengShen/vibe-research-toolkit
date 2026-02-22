@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vibe-research-toolkit metrics contract",
+  "type": "object",
+  "required": [
+    "status",
+    "primary",
+    "metrics",
+    "run"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "canceled"
+      ]
+    },
+    "primary": {
+      "type": "object",
+      "required": [
+        "name",
+        "value",
+        "higher_is_better"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": "number"
+        },
+        "higher_is_better": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object"
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "started_at",
+        "ended_at"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": "string"
+        },
+        "seed": {
+          "type": "integer"
+        },
+        "params": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "error": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

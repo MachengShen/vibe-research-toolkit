@@ -2,6 +2,7 @@
 name: tavily-search
 description: "Use Tavily Search API for web lookups with citations and concise summaries."
 metadata: {"openclaw":{"requires":{"env":["TAVILY_API_KEY"],"bins":["python3"]},"primaryEnv":"TAVILY_API_KEY"}}
+version: 1.0
 ---
 
 # Tavily Search

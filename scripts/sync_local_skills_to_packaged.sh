@@ -109,7 +109,9 @@ if [[ "$UPDATE_MANIFEST" == "true" && "${#synced[@]}" -gt 0 ]]; then
         echo "# Packaged custom skills installed by scripts/install_packaged_skills.sh"
       fi
       {
-        [[ -f "$MANIFEST_FILE" ]] && grep -E '^codex/' "$MANIFEST_FILE" || true
+        if [[ -f "$MANIFEST_FILE" ]]; then
+          grep -E '^codex/' "$MANIFEST_FILE" || true
+        fi
         for name in "${synced[@]}"; do
           echo "codex/$name"
         done

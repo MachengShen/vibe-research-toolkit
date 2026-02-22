@@ -1,6 +1,7 @@
 ---
 name: ml-run-monitor-decider
 description: "Use when launching and monitoring ML runs with checkpoint-based decisions; must report latest metrics, explicit continue/stop/branch decision, and exact next command or config change."
+version: 1.0
 ---
 
 # ML Run Monitor Decider

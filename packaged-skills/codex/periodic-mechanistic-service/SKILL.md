@@ -1,6 +1,7 @@
 ---
 name: periodic-mechanistic-service
 description: "Use when the user wants recurring mechanistic tasks (updates, sync, cleanup, checks) to run automatically; implement a systemd timer/service with logs, safety checks, and verification."
+version: 1.0
 ---
 
 # Periodic Mechanistic Service

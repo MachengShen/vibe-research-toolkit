@@ -1,6 +1,7 @@
 ---
 name: openclaw-media-send
 description: "Use when a CLI Codex agent needs to send a Discord/Slack (or other OpenClaw-supported channel) message with a local attachment via the OpenClaw CLI (`openclaw message send --media ...`)."
+version: 1.0
 ---
 
 # OpenClaw Media Send

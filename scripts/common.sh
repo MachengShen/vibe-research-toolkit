@@ -33,7 +33,9 @@ resolve_node_bin() {
     return
   fi
   local nvm_candidate
-  nvm_candidate="$(ls -1 /root/.nvm/versions/node/v*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)"
+  nvm_candidate="$(
+    compgen -G '/root/.nvm/versions/node/v*/bin/node' | sort -V | tail -n 1 || true
+  )"
   if [[ -n "$nvm_candidate" && -x "$nvm_candidate" ]]; then
     echo "$nvm_candidate"
     return
@@ -55,7 +57,9 @@ resolve_openclaw_bin() {
     return
   fi
   local nvm_candidate
-  nvm_candidate="$(ls -1 /root/.nvm/versions/node/v*/bin/openclaw 2>/dev/null | sort -V | tail -n 1 || true)"
+  nvm_candidate="$(
+    compgen -G '/root/.nvm/versions/node/v*/bin/openclaw' | sort -V | tail -n 1 || true
+  )"
   if [[ -n "$nvm_candidate" && -x "$nvm_candidate" ]]; then
     echo "$nvm_candidate"
     return

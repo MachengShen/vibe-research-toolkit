@@ -1,6 +1,7 @@
 ---
 name: ml-ablation-five-step-loop
 description: "Use when running multi-phase ML ablation studies with monitor-gated intermediate decisions (sanity check, phase ablations, reflection summary) and adaptive redesign between phases. Best for overnight or long-running investigations where sample efficiency or hyperparameter sensitivity is the target."
+version: 1.0
 ---
 
 # ML Ablation Five-Step Monitor Loop

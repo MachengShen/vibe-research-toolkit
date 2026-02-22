@@ -1,6 +1,7 @@
 ---
 name: delegate-coding-tasks
 description: Delegates coding tasks and tool design to a specialized coding agent (e.g., Codex) to leverage their capabilities and optimize token usage for the main agent.
+version: 1.0
 ---
 
 # Delegate Coding Tasks

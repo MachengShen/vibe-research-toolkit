@@ -1,6 +1,7 @@
 ---
 name: system-setup-context-awareness
 description: "Use when the task changes machine-level setup, relay/runtime behavior, bootstrap scripts, cron/systemd jobs, or cross-repo environment conventions. Read and update the system working-memory file and handoff logs, and treat Discord speech-to-text user messages as potentially noisy text that must be interpreted from exact context."
+version: 1.0
 ---
 
 # System Setup Context Awareness

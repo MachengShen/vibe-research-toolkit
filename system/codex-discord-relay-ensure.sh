@@ -27,7 +27,9 @@ else
   major=""
 fi
 if [[ -z "$major" || "$major" -lt 20 ]]; then
-  nvm_node="$(ls -1 /root/.nvm/versions/node/v*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)"
+  nvm_node="$(
+    compgen -G '/root/.nvm/versions/node/v*/bin/node' | sort -V | tail -n 1 || true
+  )"
   if [[ -n "$nvm_node" && -x "$nvm_node" ]]; then
     NODE_BIN="$nvm_node"
   fi
@@ -36,7 +38,8 @@ if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
   log "ensure: node binary not found (set NODE_BIN or install node>=20)"
   exit 1
 fi
-export PATH="$(dirname "$NODE_BIN"):$PATH"
+node_dir="$(dirname "$NODE_BIN")"
+export PATH="$node_dir:$PATH"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   log "ensure: missing env file: $ENV_FILE"
@@ -45,14 +48,14 @@ fi
 
 # Load shared proxy config if present (useful behind the Great Firewall).
 if [[ -f "$PROXY_ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
   set -a
+  # shellcheck disable=SC1090
   source "$PROXY_ENV_FILE"
   set +a
 fi
 
-# shellcheck disable=SC1090
 set -a
+# shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
 
@@ -68,7 +71,7 @@ if [[ -f "$PID_FILE" ]]; then
   fi
 fi
 
-existing_pid="$(ps -eo pid=,args= | awk -v p=\"$APP_DIR/relay.js\" 'index($0,p)>0 {print $1; exit}')"
+existing_pid="$(ps -eo pid=,args= | awk -v p="$APP_DIR/relay.js" 'index($0,p)>0 {print $1; exit}')"
 if [[ -n "$existing_pid" ]]; then
   echo "$existing_pid" > "$PID_FILE"
   exit 0

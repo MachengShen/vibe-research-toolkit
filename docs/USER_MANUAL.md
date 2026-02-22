@@ -181,6 +181,5 @@ node --check codex-discord-relay/relay.js
 
 - `README.md` — project overview and quickstart
 - `docs/ML_RESEARCH_DESIGN.md` — design rationale for researchers
-- `docs/REPO_RENAME_AND_MIGRATION.md` — rename cutover steps
 - `docs/WORKING_MEMORY.md` — living snapshot
 - `HANDOFF_LOG.md` — append-only chronology

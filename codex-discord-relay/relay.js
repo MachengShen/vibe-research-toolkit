@@ -215,6 +215,8 @@ const CONFIG = {
   claudePermissionMode: resolveClaudePermissionMode(),
   claudeAllowedTools: parseToolList(process.env.CLAUDE_ALLOWED_TOOLS || ""),
   agentTimeoutMs: Math.max(0, intEnv("RELAY_AGENT_TIMEOUT_MS", 10 * 60 * 1000)),
+  codexTransientRetryEnabled: boolEnv("RELAY_CODEX_TRANSIENT_RETRY_ENABLED", true),
+  codexTransientRetryMax: Math.max(0, Math.min(3, intEnv("RELAY_CODEX_TRANSIENT_RETRY_MAX", 1))),
   sandbox: (process.env.CODEX_SANDBOX || "workspace-write").trim(),
   approvalPolicy: (
     process.env.CODEX_APPROVAL_POLICY ||
@@ -276,6 +278,15 @@ const CONFIG = {
   tasksStopOnError: boolEnv("RELAY_TASKS_STOP_ON_ERROR", false),
   tasksPostFullOutput: boolEnv("RELAY_TASKS_POST_FULL_OUTPUT", true),
   tasksSummaryAfterRun: boolEnv("RELAY_TASKS_SUMMARY_AFTER_RUN", true),
+  goAutoWrapLongTasks: boolEnv("RELAY_GO_AUTOWRAP_LONG_TASKS", true),
+  goLongTaskWatchEverySec: Math.max(5, intEnv("RELAY_GO_LONG_TASK_WATCH_EVERY_SEC", 120)),
+  goLongTaskTailLines: Math.max(10, intEnv("RELAY_GO_LONG_TASK_TAIL_LINES", 80)),
+  jobsWatchCompact: boolEnv("RELAY_JOBS_WATCH_COMPACT", true),
+  jobsWatchPostNoChange: boolEnv("RELAY_JOBS_WATCH_POST_NO_CHANGE", false),
+  jobsWatchIncludeTailOnChange: boolEnv("RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_CHANGE", false),
+  jobsWatchIncludeTailOnFinish: boolEnv("RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_FINISH", false),
+  jobsWatchCompactTailLines: Math.max(1, intEnv("RELAY_JOBS_WATCH_COMPACT_TAIL_LINES", 3)),
+  jobsWatchCompactTailMaxChars: Math.max(80, intEnv("RELAY_JOBS_WATCH_COMPACT_TAIL_MAX_CHARS", 600)),
 
   worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
   worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
@@ -413,6 +424,7 @@ const taskRunnerByConversation = new Map();
 const jobWatchersByKey = new Map();
 const researchStepByConversation = new Set();
 const researchLastTickByConversation = new Map();
+const interruptedAgentRunsAfterRestart = [];
 let researchTickTimer = null;
 let DISCORD_CLIENT = null;
 
@@ -518,7 +530,7 @@ function normalizeRelayActionWatch(rawWatch) {
   if (!rawWatch || typeof rawWatch !== "object" || Array.isArray(rawWatch)) {
     return { ok: true, watch: null };
   }
-  const allowedKeys = new Set(["everySec", "tailLines", "thenTask", "runTasks"]);
+  const allowedKeys = new Set(["everySec", "tailLines", "thenTask", "thenTaskDescription", "runTasks"]);
   for (const k of Object.keys(rawWatch)) {
     if (!allowedKeys.has(k)) {
       return { ok: false, error: `unknown watch field: ${k}`, watch: null };
@@ -528,6 +540,7 @@ function normalizeRelayActionWatch(rawWatch) {
   const everySecRaw = rawWatch.everySec;
   const tailLinesRaw = rawWatch.tailLines;
   const thenTaskRaw = rawWatch.thenTask;
+  const thenTaskDescriptionRaw = rawWatch.thenTaskDescription;
   const runTasksRaw = rawWatch.runTasks;
 
   const everySec = everySecRaw == null ? null : Number(everySecRaw);
@@ -546,12 +559,23 @@ function normalizeRelayActionWatch(rawWatch) {
             if (!s) return null;
             return s.length > 2000 ? s.slice(0, 2000) : s;
           })(),
+    thenTaskDescription:
+      thenTaskDescriptionRaw == null
+        ? null
+        : (() => {
+            const s = taskTextPreview(thenTaskDescriptionRaw, 200);
+            return s || null;
+          })(),
     runTasks: Boolean(runTasksRaw),
   };
 
   // If all fields are empty, treat as no watch config.
   const hasAny =
-    normalized.everySec != null || normalized.tailLines != null || normalized.thenTask != null || normalized.runTasks;
+    normalized.everySec != null ||
+    normalized.tailLines != null ||
+    normalized.thenTask != null ||
+    normalized.thenTaskDescription != null ||
+    normalized.runTasks;
   return { ok: true, watch: hasAny ? normalized : null };
 }
 
@@ -571,14 +595,25 @@ function normalizeRelayAction(rawAction) {
   };
 
   if (type === "job_start") {
-    const err = assertAllowedKeys(["type", "command", "watch"]);
+    // Also accept thenTask/thenTaskDescription at top level for agent compatibility
+    // (agents naturally write them there; auto-migrate into watch).
+    const err = assertAllowedKeys(["type", "command", "description", "watch", "thenTask", "thenTaskDescription"]);
     if (err) return { ok: false, error: err, action: null };
     const command = String(rawAction.command || "").trim();
     if (!command) return { ok: false, error: "job_start: missing command", action: null };
     if (command.length > 4000) return { ok: false, error: "job_start: command too long", action: null };
-    const watchRes = normalizeRelayActionWatch(rawAction.watch);
+    const description = rawAction.description == null ? null : taskTextPreview(rawAction.description, 200) || null;
+    // Merge top-level thenTask/thenTaskDescription into watch object.
+    let mergedWatch = rawAction.watch;
+    if (rawAction.thenTask != null || rawAction.thenTaskDescription != null) {
+      mergedWatch = Object.assign({}, rawAction.watch || {});
+      if (rawAction.thenTask != null && mergedWatch.thenTask == null) mergedWatch.thenTask = rawAction.thenTask;
+      if (rawAction.thenTaskDescription != null && mergedWatch.thenTaskDescription == null)
+        mergedWatch.thenTaskDescription = rawAction.thenTaskDescription;
+    }
+    const watchRes = normalizeRelayActionWatch(mergedWatch);
     if (!watchRes.ok) return { ok: false, error: `job_start: ${watchRes.error}`, action: null };
-    return { ok: true, error: "", action: { type, command, watch: watchRes.watch } };
+    return { ok: true, error: "", action: { type, command, description, watch: watchRes.watch } };
   }
 
   if (type === "job_watch") {
@@ -596,12 +631,13 @@ function normalizeRelayAction(rawAction) {
   }
 
   if (type === "task_add") {
-    const err = assertAllowedKeys(["type", "text"]);
+    const err = assertAllowedKeys(["type", "text", "description"]);
     if (err) return { ok: false, error: err, action: null };
     const text = String(rawAction.text || "").trim();
     if (!text) return { ok: false, error: "task_add: missing text", action: null };
     const clipped = text.length > 2000 ? text.slice(0, 2000) : text;
-    return { ok: true, error: "", action: { type, text: clipped } };
+    const description = rawAction.description == null ? null : taskTextPreview(rawAction.description, 200) || null;
+    return { ok: true, error: "", action: { type, text: clipped, description } };
   }
 
   if (type === "task_run") {
@@ -645,7 +681,9 @@ function extractRelayActions(text, { maxActions = 1 } = {}) {
 
   for (const block of blocks) {
     if (actions.length >= budget) break;
-    const raw = String(block || "").trim();
+    let raw = String(block || "").trim();
+    // Strip markdown code fences agents sometimes wrap JSON in (```json ... ``` or ``` ... ```).
+    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     if (!raw) continue;
     if (raw.length > 20000) {
       errors.push("relay-actions block too large (skipped)");
@@ -1073,6 +1111,33 @@ function normalizeTaskObject(task, fallbackId) {
     task.text = String(task.text || "");
     changed = true;
   }
+  if (task.description != null && typeof task.description !== "string") {
+    task.description = String(task.description || "");
+    changed = true;
+  }
+  const normalizedDescription = task.description == null ? "" : String(task.description || "").trim();
+  const clippedDescription = normalizedDescription ? taskTextPreview(normalizedDescription, 200) : null;
+  if (task.description !== clippedDescription) {
+    task.description = clippedDescription;
+    changed = true;
+  }
+  if (!task.description) {
+    const derivedDescription = taskTextPreview(task.text || "", 200) || null;
+    if (task.description !== derivedDescription) {
+      task.description = derivedDescription;
+      changed = true;
+    }
+  }
+  if (task.sourceJobId != null && typeof task.sourceJobId !== "string") {
+    task.sourceJobId = String(task.sourceJobId || "");
+    changed = true;
+  }
+  const sourceJobId = task.sourceJobId == null ? "" : String(task.sourceJobId || "").trim();
+  const normalizedSourceJobId = sourceJobId || null;
+  if (task.sourceJobId !== normalizedSourceJobId) {
+    task.sourceJobId = normalizedSourceJobId;
+    changed = true;
+  }
   const status = String(task.status || "pending").toLowerCase();
   if (!validStatuses.has(status)) {
     task.status = "pending";
@@ -1192,6 +1257,7 @@ function normalizeJobWatchObject(watch) {
     everySec: Math.max(1, Math.min(86400, Math.floor(Number(watch.everySec || 300) || 300))),
     tailLines: Math.max(1, Math.min(500, Math.floor(Number(watch.tailLines || 50) || 50))),
     thenTask: watch.thenTask == null ? null : String(watch.thenTask || "").trim() || null,
+    thenTaskDescription: watch.thenTaskDescription == null ? null : taskTextPreview(watch.thenTaskDescription, 200) || null,
     runTasks: Boolean(watch.runTasks),
   };
   if (out.thenTask && out.thenTask.length > 2000) out.thenTask = out.thenTask.slice(0, 2000);
@@ -1209,6 +1275,16 @@ function normalizeJobObject(job, fallbackId) {
   }
   if (typeof job.command !== "string") {
     job.command = String(job.command || "");
+    changed = true;
+  }
+  if (job.description != null && typeof job.description !== "string") {
+    job.description = String(job.description || "");
+    changed = true;
+  }
+  const normalizedDescription = job.description == null ? "" : String(job.description || "").trim();
+  const clippedDescription = normalizedDescription ? taskTextPreview(normalizedDescription, 200) : null;
+  if (job.description !== clippedDescription) {
+    job.description = clippedDescription;
     changed = true;
   }
   if (typeof job.workdir !== "string" || !job.workdir.trim()) {
@@ -1336,7 +1412,69 @@ function ensureResearchShape(session) {
   return changed;
 }
 
-function normalizeSessionAfterLoad(session) {
+function newAgentRunState() {
+  return {
+    status: null, // null | queued | running
+    provider: null,
+    reason: null,
+    queuedAt: null,
+    startedAt: null,
+    pendingMessageId: null,
+    channelId: null,
+    guildId: null,
+    lastInterruptedAt: null,
+    lastInterruptedReason: null,
+  };
+}
+
+function ensureAgentRunShape(session) {
+  if (!session || typeof session !== "object") return false;
+  let changed = false;
+  if (!session.agentRun || typeof session.agentRun !== "object" || Array.isArray(session.agentRun)) {
+    session.agentRun = newAgentRunState();
+    return true;
+  }
+  const fields = [
+    "status",
+    "provider",
+    "reason",
+    "queuedAt",
+    "startedAt",
+    "pendingMessageId",
+    "channelId",
+    "guildId",
+    "lastInterruptedAt",
+    "lastInterruptedReason",
+  ];
+  for (const key of fields) {
+    const value = session.agentRun[key];
+    if (value != null && typeof value !== "string") {
+      session.agentRun[key] = String(value || "");
+      changed = true;
+    }
+    if (!session.agentRun[key]) {
+      session.agentRun[key] = null;
+      changed = true;
+    }
+  }
+  if (session.agentRun.status && !["queued", "running"].includes(session.agentRun.status)) {
+    session.agentRun.status = null;
+    changed = true;
+  }
+  return changed;
+}
+
+function recordAgentRunStatus(session, patch) {
+  if (!session || typeof session !== "object") return;
+  ensureAgentRunShape(session);
+  const next = patch && typeof patch === "object" ? patch : {};
+  session.agentRun = {
+    ...session.agentRun,
+    ...next,
+  };
+}
+
+function normalizeSessionAfterLoad(session, conversationKey) {
   if (!session || typeof session !== "object") return false;
   let changed = false;
   changed = ensureTasksShape(session) || changed;
@@ -1345,6 +1483,7 @@ function normalizeSessionAfterLoad(session) {
   changed = ensureJobsShape(session) || changed;
   changed = ensureAutoShape(session) || changed;
   changed = ensureResearchShape(session) || changed;
+  changed = ensureAgentRunShape(session) || changed;
 
   if (session.lastChannelId != null && typeof session.lastChannelId !== "string") {
     session.lastChannelId = null;
@@ -1383,6 +1522,29 @@ function normalizeSessionAfterLoad(session) {
       changed = true;
     }
   }
+
+  if (session.agentRun && (session.agentRun.status === "queued" || session.agentRun.status === "running")) {
+    interruptedAgentRunsAfterRestart.push({
+      conversationKey: String(conversationKey || ""),
+      status: session.agentRun.status,
+      provider: session.agentRun.provider || CONFIG.agentProvider,
+      reason: session.agentRun.reason || "request",
+      queuedAt: session.agentRun.queuedAt || null,
+      startedAt: session.agentRun.startedAt || null,
+      pendingMessageId: session.agentRun.pendingMessageId || null,
+      channelId: session.agentRun.channelId || session.lastChannelId || null,
+      guildId: session.agentRun.guildId || session.lastGuildId || null,
+    });
+    session.agentRun.lastInterruptedAt = nowIso();
+    session.agentRun.lastInterruptedReason = "interrupted by relay restart";
+    session.agentRun.status = null;
+    session.agentRun.provider = null;
+    session.agentRun.reason = null;
+    session.agentRun.queuedAt = null;
+    session.agentRun.startedAt = null;
+    session.agentRun.pendingMessageId = null;
+    changed = true;
+  }
   return changed;
 }
 
@@ -1401,8 +1563,8 @@ async function ensureStateLoaded() {
       state.version = Number(parsed.version || 1);
       state.sessions = parsed.sessions;
       let mutated = false;
-      for (const session of Object.values(state.sessions)) {
-        mutated = normalizeSessionAfterLoad(session) || mutated;
+      for (const [conversationKey, session] of Object.entries(state.sessions)) {
+        mutated = normalizeSessionAfterLoad(session, conversationKey) || mutated;
       }
       if (mutated) await queueSaveState();
       return;
@@ -1801,6 +1963,7 @@ function getSession(key) {
     ensureJobsShape(existing);
     ensureAutoShape(existing);
     ensureResearchShape(existing);
+    ensureAgentRunShape(existing);
     return existing;
   }
   const created = {
@@ -1820,6 +1983,7 @@ function getSession(key) {
       managerConvKey: null,
       lastNoteAt: null,
     },
+    agentRun: newAgentRunState(),
     lastChannelId: null,
     lastGuildId: null,
   };
@@ -1844,13 +2008,66 @@ function extractPrompt(message, botUserId) {
 
 function parseCommand(prompt) {
   const match = prompt.match(
-    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|research|auto|go|overnight)\b(?:\s+([\s\S]+))?$/i
+    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|research|auto|go|overnight|job)\b(?:\s+([\s\S]+))?$/i
   );
   if (!match) return null;
   return {
     name: match[1].toLowerCase(),
     arg: (match[2] || "").trim(),
   };
+}
+
+function commandHead(command) {
+  if (!command || typeof command !== "object") return "";
+  const { head } = splitFirstToken(String(command.arg || ""));
+  return String(head || "").toLowerCase();
+}
+
+function shouldBypassConversationQueue(command) {
+  if (!command || typeof command !== "object") return false;
+
+  // Always-fast control/status commands.
+  if (command.name === "help" || command.name === "status") return true;
+
+  if (command.name === "task") {
+    const sub = commandHead(command);
+    // Keep task inspection and emergency stop responsive during long runs.
+    return !sub || sub === "list" || sub === "stop";
+  }
+
+  if (command.name === "context") {
+    const sub = String(command.arg || "").trim().toLowerCase();
+    // `/context reload` mutates state and should remain ordered in queue.
+    return sub !== "reload";
+  }
+
+  if (command.name === "auto") {
+    // `/auto` without args is read-only status.
+    return !commandHead(command);
+  }
+
+  if (command.name === "research" || command.name === "overnight") {
+    const sub = commandHead(command) || "status";
+    return sub === "status";
+  }
+
+  if (command.name === "plan") {
+    const sub = commandHead(command);
+    return !sub || sub === "list" || sub === "show";
+  }
+
+  if (command.name === "worktree") {
+    const sub = commandHead(command);
+    return !sub || sub === "list";
+  }
+
+  if (command.name === "job") {
+    const sub = commandHead(command);
+    // list and logs are read-only; no sub also defaults to list.
+    return !sub || sub === "list" || sub === "logs";
+  }
+
+  return false;
 }
 
 function getSessionContextVersion(session) {
@@ -2029,6 +2246,9 @@ function buildRelayRuntimeContext(meta) {
   const scope = meta && meta.isDm ? "dm" : meta && meta.isThread ? "guild-thread" : "guild-channel";
   const uploadDir = meta && meta.uploadDir ? meta.uploadDir : CONFIG.uploadRootDir;
   const workdir = meta && meta.session && meta.session.workdir ? meta.session.workdir : CONFIG.defaultWorkdir;
+  const actionsConfigHint = `RELAY_AGENT_ACTIONS_ENABLED=${CONFIG.agentActionsEnabled ? "true" : "false"}, RELAY_AGENT_ACTIONS_DM_ONLY=${
+    CONFIG.agentActionsDmOnly ? "true" : "false"
+  }`;
   const lines = [
     `You are running through a Discord relay (provider=${CONFIG.agentProvider}, scope=${scope}).`,
     "Your response is posted back to Discord.",
@@ -2040,7 +2260,7 @@ function buildRelayRuntimeContext(meta) {
     "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
     "- If you need to launch a long-running shell job and watch it, you may request relay actions via a JSON block:",
-    "- [[relay-actions]]{\"actions\":[{\"type\":\"job_start\",\"command\":\"sleep 3 && echo done\",\"watch\":{\"everySec\":1,\"tailLines\":50}}]}[[/relay-actions]] (requires RELAY_AGENT_ACTIONS_ENABLED=true; DM-only by default).",
+    `- [[relay-actions]]{"actions":[{"type":"job_start","command":"sleep 3 && echo done","watch":{"everySec":1,"tailLines":50}}]}[[/relay-actions]] (current: ${actionsConfigHint}).`,
   ];
   if (CONFIG.discordAttachmentsEnabled) {
     lines.push(
@@ -2547,6 +2767,59 @@ function isTransientClaudeInitError(err) {
   );
 }
 
+function codexErrorMessage(err) {
+  return String((err && err.message) || err || "");
+}
+
+function isCodexLikelyPermanentError(err) {
+  const msg = codexErrorMessage(err).toLowerCase();
+  if (!msg) return false;
+  const permanentNeedles = [
+    "unexpected argument",
+    "invalid value",
+    "invalid option",
+    "usage:",
+    "no such file or directory",
+    "permission denied",
+    "failed to parse thread id from rollout file",
+    "state db missing rollout path for thread",
+    "no conversation found with session id",
+    "json parse failed",
+  ];
+  return permanentNeedles.some((needle) => msg.includes(needle));
+}
+
+function isTransientCodexRuntimeError(err) {
+  const msg = codexErrorMessage(err).toLowerCase();
+  if (!msg) return false;
+  if (msg.includes("codex timeout after")) return false;
+  if (isCodexLikelyPermanentError(err)) return false;
+  const networkNeedles = [
+    "econnreset",
+    "econnrefused",
+    "eai_again",
+    "enotfound",
+    "etimedout",
+    "timed out",
+    "network",
+    "socket hang up",
+    "tls",
+    "proxy",
+    "upstream",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "rate limit",
+    "429",
+    "502",
+    "503",
+    "504",
+  ];
+  if (networkNeedles.some((needle) => msg.includes(needle))) return true;
+  // Some transient codex failures return only "codex exit 1" with no stderr details.
+  return /^codex exit 1\s*$/m.test(msg) || msg.startsWith("codex exit 1\n");
+}
+
 async function enqueueConversation(key, task) {
   const prev = queueByConversation.get(key) || Promise.resolve();
   const next = prev.catch(() => {}).then(task);
@@ -2586,6 +2859,27 @@ function taskTextPreview(text, maxLen = 60) {
   if (!raw) return "";
   if (raw.length <= maxLen) return raw;
   return `${raw.slice(0, maxLen - 1)}…`;
+}
+
+function summarizeTaskCounts(tasks) {
+  const counts = { pending: 0, running: 0, done: 0, failed: 0, blocked: 0, canceled: 0 };
+  for (const t of Array.isArray(tasks) ? tasks : []) {
+    if (!t || typeof t !== "object") continue;
+    if (counts[t.status] != null) counts[t.status] += 1;
+  }
+  return counts;
+}
+
+function taskDisplayDescription(task, maxLen = 96) {
+  if (!task || typeof task !== "object") return "";
+  const explicit = taskTextPreview(task.description || "", maxLen);
+  if (explicit) return explicit;
+  return taskTextPreview(task.text || "", maxLen);
+}
+
+function jobDisplayDescription(job, maxLen = 96) {
+  if (!job || typeof job !== "object") return "";
+  return taskTextPreview(job.description || "", maxLen);
 }
 
 function safeConversationDirName(conversationKey) {
@@ -3407,6 +3701,7 @@ async function executeResearchActions({
         session,
         command: wrappedCommand,
         workdir: session.workdir || CONFIG.defaultWorkdir,
+        description: action.description || `Research run ${runId}`,
       });
       if (!started.ok || !started.job) {
         return { ok: false, executed, lines, error: started.error || "job_start failed" };
@@ -3453,7 +3748,7 @@ async function executeResearchActions({
       });
 
       executed += 1;
-      lines.push(`- job_start: \`${job.id}\` run=\`${runId}\``);
+      lines.push(`- job_start: \`${job.id}\` run=\`${runId}\`${jobDisplayDescription(job, 80) ? ` desc="${jobDisplayDescription(job, 80)}"` : ""}`);
       managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
       continue;
     }
@@ -3502,12 +3797,14 @@ async function executeResearchActions({
       if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
         return { ok: false, executed, lines, error: `task_add blocked: queue full (pending=${pending}, max=${CONFIG.tasksMaxPending})` };
       }
-      const task = createTask(session, String(action.text || ""));
+      const task = createTask(session, String(action.text || ""), {
+        description: action.description || null,
+      });
       session.tasks.push(task);
       session.updatedAt = nowIso();
       await queueSaveState();
       executed += 1;
-      lines.push(`- task_add: \`${task.id}\``);
+      lines.push(`- task_add: \`${task.id}\`${taskDisplayDescription(task, 80) ? ` desc="${taskDisplayDescription(task, 80)}"` : ""}`);
       managerState.appliedActionKeys = trimArrayUniquePush(managerState.appliedActionKeys, idem, 2000);
       continue;
     }
@@ -4089,6 +4386,68 @@ function startResearchTickLoop() {
   );
 }
 
+async function notifyInterruptedAgentRuns(client) {
+  if (!client) return;
+  if (!Array.isArray(interruptedAgentRunsAfterRestart) || interruptedAgentRunsAfterRestart.length === 0) return;
+  const pending = interruptedAgentRunsAfterRestart.splice(0, interruptedAgentRunsAfterRestart.length);
+  for (const item of pending) {
+    const conversationKey = item && item.conversationKey ? String(item.conversationKey) : "";
+    const session = conversationKey ? state.sessions[conversationKey] : null;
+    const channelId = String((item && item.channelId) || (session && session.lastChannelId) || "").trim();
+    if (!channelId) {
+      logRelayEvent("agent.run.interrupted_notice.skipped", {
+        conversationKey,
+        reason: "missing_channel_id",
+      });
+      continue;
+    }
+    const status = String((item && item.status) || "running");
+    const provider = String((item && item.provider) || CONFIG.agentProvider || "agent");
+    const runReason = cleanProgressText(String((item && item.reason) || "request"), 120) || "request";
+    const startedAt = String((item && item.startedAt) || (item && item.queuedAt) || "unknown");
+    const summary = `Run status: interrupted (relay restart while ${provider} run was ${status}, reason ${runReason}, started ${startedAt}). Please resend your last message if needed.`;
+
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel || typeof channel.send !== "function") {
+        logRelayEvent("agent.run.interrupted_notice.skipped", {
+          conversationKey,
+          channelId,
+          reason: "channel_unavailable",
+        });
+        continue;
+      }
+
+      let edited = false;
+      const pendingMessageId = String((item && item.pendingMessageId) || "").trim();
+      if (pendingMessageId && channel.messages && typeof channel.messages.fetch === "function") {
+        try {
+          const msg = await channel.messages.fetch(pendingMessageId);
+          if (msg && typeof msg.edit === "function") {
+            await msg.edit(summary);
+            edited = true;
+          }
+        } catch {}
+      }
+      if (!edited) {
+        await sendLongToChannel(channel, summary);
+      }
+      logRelayEvent("agent.run.interrupted_notice.sent", {
+        conversationKey,
+        channelId,
+        pendingMessageId: pendingMessageId || null,
+        editedPending: edited,
+      });
+    } catch (err) {
+      logRelayEvent("agent.run.interrupted_notice.error", {
+        conversationKey,
+        channelId,
+        error: String(err && err.message ? err.message : err).slice(0, 240),
+      });
+    }
+  }
+}
+
 async function handleResearchJobCompletion({ conversationKey, session, job, exitCode, channel }) {
   if (!job || typeof job !== "object") return;
   const meta = job.research;
@@ -4315,10 +4674,32 @@ async function readTailLines(filePath, maxLines, maxBytes = 128 * 1024) {
   }
 }
 
-async function startJobProcess({ conversationKey, session, command, workdir }) {
+function summarizeTailText(tail) {
+  const text = String(tail || "");
+  if (!text) return { lineCount: 0, charCount: 0 };
+  return {
+    lineCount: text.split(/\r?\n/).length,
+    charCount: text.length,
+  };
+}
+
+function compactTailSnippet(tail, maxLines = 3, maxChars = 600) {
+  const text = String(tail || "").trimEnd();
+  if (!text) return "";
+  const wantLines = Math.max(1, Math.min(50, Math.floor(Number(maxLines || 3) || 3)));
+  const wantChars = Math.max(80, Math.min(4000, Math.floor(Number(maxChars || 600) || 600)));
+  let out = text.split(/\r?\n/).slice(-wantLines).join("\n");
+  if (out.length > wantChars) {
+    out = `...${out.slice(-(wantChars - 3))}`;
+  }
+  return out;
+}
+
+async function startJobProcess({ conversationKey, session, command, workdir, description }) {
   const cmd = String(command || "").trim();
   if (!cmd) return { ok: false, error: "missing command", job: null };
   if (cmd.length > 4000) return { ok: false, error: "command too long", job: null };
+  const desc = taskTextPreview(description, 200) || null;
 
   const absWorkdir = path.resolve(workdir || session.workdir || CONFIG.defaultWorkdir);
   const jobId = newJobId();
@@ -4379,6 +4760,7 @@ async function startJobProcess({ conversationKey, session, command, workdir }) {
   const job = {
     id: jobId,
     command: cmd,
+    description: desc,
     workdir: absWorkdir,
     status: "running",
     startedAt: nowIso(),
@@ -4410,6 +4792,7 @@ function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault }
   const tailLines =
     watch && watch.tailLines != null ? Number(watch.tailLines) : Number(tailLinesDefault != null ? tailLinesDefault : 50);
   const thenTask = watch && watch.thenTask != null ? String(watch.thenTask || "").trim() : "";
+  const thenTaskDescription = watch && watch.thenTaskDescription != null ? String(watch.thenTaskDescription || "").trim() : "";
   const runTasks = Boolean(watch && watch.runTasks);
 
   return {
@@ -4417,6 +4800,7 @@ function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault }
     everySec: Number.isFinite(everySec) ? Math.max(1, Math.min(86400, Math.floor(everySec))) : 300,
     tailLines: Number.isFinite(tailLines) ? Math.max(1, Math.min(500, Math.floor(tailLines))) : 50,
     thenTask: thenTask ? (thenTask.length > 2000 ? thenTask.slice(0, 2000) : thenTask) : null,
+    thenTaskDescription: thenTaskDescription ? taskTextPreview(thenTaskDescription, 200) : null,
     runTasks,
   };
 }
@@ -4458,7 +4842,12 @@ async function maybeStartTaskRunner(conversationKey, channel, session, meta) {
   await queueSaveState();
   taskRunnerByConversation.set(conversationKey, { running: true, stopRequested: false });
   try {
-    if (channel) await channel.send("Task runner started.");
+    if (channel) {
+      const counts = summarizeTaskCounts(session.tasks);
+      await channel.send(
+        `Task runner started. pending=${counts.pending} running=${counts.running} done=${counts.done} failed=${counts.failed} blocked=${counts.blocked} canceled=${counts.canceled}`
+      );
+    }
   } catch {}
   void kickTaskRunner(conversationKey, channel, session, meta);
   return { ok: true, started: true };
@@ -4486,12 +4875,16 @@ async function tickJobWatcher(watcher) {
     const startedAtMs = Date.parse(job.startedAt || "") || Date.now();
     const elapsed = formatElapsed(Date.now() - startedAtMs);
     const tail = await readTailLines(job.logPath, watcher.tailLines, 128 * 1024);
+    const tailStats = summarizeTailText(tail);
     const tailHash = crypto.createHash("sha1").update(tail).digest("hex").slice(0, 12);
     const changed = watcher.lastTailHash !== tailHash;
     watcher.lastTailHash = tailHash;
 
     const ch = await resolveChannelForWatch(channelId);
-    const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})`;
+    const jobDescription = jobDisplayDescription(job, 96);
+    const taskCounts = summarizeTaskCounts(session.tasks);
+    const taskSummary = `tasks pending=${taskCounts.pending} running=${taskCounts.running} done=${taskCounts.done} failed=${taskCounts.failed} blocked=${taskCounts.blocked} canceled=${taskCounts.canceled}`;
+    const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})${jobDescription ? ` | ${jobDescription}` : ""}`;
 
     if (exitRes.ok) {
       // Finalization is intentionally out-of-queue so callback tasks still fire even if
@@ -4499,6 +4892,7 @@ async function tickJobWatcher(watcher) {
       const code = exitRes.code;
       const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
       const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
+      const thenTaskDescription = watch && watch.thenTaskDescription ? String(watch.thenTaskDescription || "").trim() : "";
       const runTasks = Boolean(watch && watch.runTasks);
 
       job.exitCode = code;
@@ -4513,7 +4907,19 @@ async function tickJobWatcher(watcher) {
 
       const lines = [];
       lines.push(`${header} -> finished (exit ${code})`);
-      if (tail) {
+      lines.push(taskSummary);
+      if (CONFIG.jobsWatchCompact) {
+        lines.push(`log: \`${job.logPath}\``);
+        if (tail) {
+          lines.push(`final output: ${tailStats.lineCount} lines, ${tailStats.charCount} chars`);
+          if (CONFIG.jobsWatchIncludeTailOnFinish) {
+            const snippet = compactTailSnippet(tail, CONFIG.jobsWatchCompactTailLines, CONFIG.jobsWatchCompactTailMaxChars);
+            if (snippet) lines.push("", "tail excerpt:", snippet);
+          }
+        } else {
+          lines.push("final output: (no captured tail)");
+        }
+      } else if (tail) {
         lines.push("", "log tail:", tail);
       }
       if (ch) await sendLongToChannel(ch, lines.join("\n"));
@@ -4544,12 +4950,19 @@ async function tickJobWatcher(watcher) {
           if (ch) await ch.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
           return;
         }
-        const task = createTask(session, thenTask);
+        const fallbackDescription = thenTaskDescription || `Follow-up for ${job.id}${jobDescription ? `: ${jobDescription}` : ""}`;
+        const task = createTask(session, thenTask, {
+          description: fallbackDescription,
+          sourceJobId: job.id,
+        });
         session.tasks.push(task);
         session.updatedAt = nowIso();
         await queueSaveState();
         logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
-        if (ch) await ch.send(`Queued follow-up task \`${task.id}\`.`);
+        if (ch) {
+          const taskLabel = taskDisplayDescription(task, 96) || "(no description)";
+          await ch.send(`Queued follow-up task \`${task.id}\`${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}`);
+        }
 
         if (runTasks) {
           await maybeStartTaskRunner(conversationKey, ch, session, {
@@ -4576,9 +4989,18 @@ async function tickJobWatcher(watcher) {
 
     if (!ch) return;
     if (changed && tail) {
-      await sendLongToChannel(ch, [header, "", "log tail:", tail].join("\n"));
-    } else {
-      await ch.send(`${header} (no new output)`);
+      if (CONFIG.jobsWatchCompact) {
+        const lines = [`${header} | ${taskSummary}`, `new output: ${tailStats.lineCount} lines, ${tailStats.charCount} chars`];
+        if (CONFIG.jobsWatchIncludeTailOnChange) {
+          const snippet = compactTailSnippet(tail, CONFIG.jobsWatchCompactTailLines, CONFIG.jobsWatchCompactTailMaxChars);
+          if (snippet) lines.push("", "tail excerpt:", snippet);
+        }
+        await sendLongToChannel(ch, lines.join("\n"));
+      } else {
+        await sendLongToChannel(ch, [header, taskSummary, "", "log tail:", tail].join("\n"));
+      }
+    } else if (CONFIG.jobsWatchPostNoChange) {
+      await ch.send(`${header} | ${taskSummary} (no new output)`);
     }
   } catch (err) {
     logRelayEvent("job.watch.error", {
@@ -4620,6 +5042,19 @@ async function startJobWatcher({ conversationKey, session, job, channelId, watch
   watcher.timer = setInterval(() => void tickJobWatcher(watcher), watcher.everySec * 1000);
   watcher.timer.unref?.();
   jobWatchersByKey.set(key, watcher);
+  const ch = await resolveChannelForWatch(watcher.channelId);
+  if (ch) {
+    try {
+      const jobDescription = jobDisplayDescription(job, 96);
+      const followUpDescription =
+        normalized.thenTaskDescription || (normalized.thenTask ? taskTextPreview(normalized.thenTask, 96) : "");
+      const mode = CONFIG.jobsWatchCompact ? "compact" : "full-tail";
+      const parts = [`[JOB ${job.id}] watcher started (every ${watcher.everySec}s, tail ${watcher.tailLines} lines, mode ${mode})`];
+      if (jobDescription) parts.push(`desc: ${jobDescription}`);
+      if (followUpDescription) parts.push(`follow-up: ${followUpDescription}`);
+      await ch.send(parts.join(" | "));
+    } catch {}
+  }
   void tickJobWatcher(watcher);
   logRelayEvent("job.watch.start", { conversationKey, jobId: job.id, everySec: watcher.everySec, tailLines: watcher.tailLines });
   return { ok: true, watcher };
@@ -4779,12 +5214,18 @@ function nextTaskId(session) {
   return `t-${String(max + 1).padStart(4, "0")}`;
 }
 
-function createTask(session, text) {
+function createTask(session, text, options = {}) {
   const id = nextTaskId(session);
   const createdAt = nowIso();
+  const rawText = String(text || "");
+  const explicitDescription = options && options.description != null ? String(options.description || "").trim() : "";
+  const sourceJobId = options && options.sourceJobId != null ? String(options.sourceJobId || "").trim() : "";
+  const description = taskTextPreview(explicitDescription || rawText, 200) || null;
   return {
     id,
-    text: String(text || ""),
+    text: rawText,
+    description,
+    sourceJobId: sourceJobId || null,
     status: "pending",
     createdAt,
     startedAt: null,
@@ -4793,6 +5234,57 @@ function createTask(session, text) {
     lastError: null,
     lastResultPreview: null,
   };
+}
+
+const GO_LONG_TASK_HINTS = [
+  /\btrain(?:ing)?\b/i,
+  /\bsweep\b/i,
+  /\bablation\b/i,
+  /\bbenchmark\b/i,
+  /\bexperiment(?:s)?\b/i,
+  /\bovernight\b/i,
+  /\beval(?:uation)?\b/i,
+  /\bepoch(?:s)?\b/i,
+  /\bseed(?:s)?\b/i,
+  /\bmatrix\b/i,
+  /\bkick[\s-]*off\b/i,
+  /\blaunch\b/i,
+  /\bre-?run\b/i,
+  /\bverify hypothesis\b/i,
+  /\blong[-\s]*running\b/i,
+];
+
+function shouldAutoWrapGoLongTask(taskText) {
+  if (!CONFIG.goAutoWrapLongTasks) return false;
+  const text = String(taskText || "").trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (lower.includes("[[relay-actions]]") || lower.includes("job_start")) return false;
+  return GO_LONG_TASK_HINTS.some((pattern) => pattern.test(text));
+}
+
+function buildGoLongTaskCallbackTaskText(taskText) {
+  const watchEverySec = Math.max(5, Number(CONFIG.goLongTaskWatchEverySec) || 120);
+  const tailLines = Math.max(10, Number(CONFIG.goLongTaskTailLines) || 80);
+  return [
+    "Use skill relay-long-task-callback.",
+    "Treat the user request below as a long-running task and launch it in background via one relay action.",
+    "",
+    "User request:",
+    String(taskText || "").trim(),
+    "",
+    "Output contract (strict):",
+    "- Emit exactly one [[relay-actions]] ... [[/relay-actions]] block with one action of type job_start.",
+    "- Set job_start.description to a short label.",
+    `- Set watch.everySec=${watchEverySec} and watch.tailLines=${tailLines}.`,
+    "- Set watch.thenTaskDescription to a short callback label.",
+    "- Set watch.thenTask to: analyze final logs/artifacts with exact paths, summarize metrics/trends/failures, propose next steps, and update HANDOFF_LOG.md plus docs/WORKING_MEMORY.md in the active repo.",
+    "- Set watch.runTasks=true.",
+    "- Ensure command is non-interactive and writes deterministic logs/artifacts.",
+    "- After the action block, emit [[task:done]].",
+    "",
+    "If critical command/path details are missing, emit [[task:blocked]] and list what is missing.",
+  ].join("\n");
 }
 
 function buildGoHandoffTaskText() {
@@ -4920,6 +5412,7 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
           session,
           command: cmd,
           workdir: session.workdir || CONFIG.defaultWorkdir,
+          description: action.description || null,
         });
         if (!started.ok) {
           lines.push(`- job_start failed: ${started.error}`);
@@ -4927,7 +5420,7 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
         }
         executed += 1;
         const job = started.job;
-        lines.push(`- job_start: \`${job.id}\` (pid ${job.pid || "?"})`);
+        lines.push(`- job_start: \`${job.id}\` (pid ${job.pid || "?"})${jobDisplayDescription(job, 80) ? ` desc="${jobDisplayDescription(job, 80)}"` : ""}`);
 
         const wantWatch = action.watch || (CONFIG.jobsAutoWatch ? {} : null);
         if (wantWatch) {
@@ -5006,12 +5499,14 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
           lines.push(`- task_add blocked: queue full (pending=${pending}, max=${CONFIG.tasksMaxPending})`);
           continue;
         }
-        const task = createTask(session, String(action.text || ""));
+        const task = createTask(session, String(action.text || ""), {
+          description: action.description || null,
+        });
         session.tasks.push(task);
         session.updatedAt = nowIso();
         await queueSaveState();
         executed += 1;
-        lines.push(`- task_add: \`${task.id}\``);
+        lines.push(`- task_add: \`${task.id}\`${taskDisplayDescription(task, 80) ? ` desc="${taskDisplayDescription(task, 80)}"` : ""}`);
         continue;
       }
 
@@ -5061,6 +5556,19 @@ async function runAgentAndPostToDiscord({
   const pendingMsg = baseMessage && typeof baseMessage.reply === "function"
     ? await baseMessage.reply(`Running ${AGENT_LABEL}...`)
     : await channel.send(`Running ${AGENT_LABEL}... (${runLabel})`);
+  recordAgentRunStatus(session, {
+    status: "queued",
+    provider: CONFIG.agentProvider,
+    reason: runLabel,
+    queuedAt: nowIso(),
+    startedAt: null,
+    pendingMessageId:
+      pendingMsg && pendingMsg.id != null ? String(pendingMsg.id) : session.agentRun && session.agentRun.pendingMessageId,
+    channelId: channel && channel.id != null ? String(channel.id) : session.lastChannelId,
+    guildId: channel && channel.guildId != null ? String(channel.guildId) : session.lastGuildId,
+  });
+  session.updatedAt = nowIso();
+  await queueSaveState();
 
   const wasAlreadyQueued = queueByConversation.has(conversationKey);
   const progress = createProgressReporter(pendingMsg, conversationKey);
@@ -5076,9 +5584,20 @@ async function runAgentAndPostToDiscord({
     reason: runLabel,
   });
 
+  let activeClaudeModel = "";
+  let usedClaudeFallback = false;
+  let codexTransientRetriesUsed = 0;
+
   return enqueueConversation(conversationKey, async () => {
     const startedAt = Date.now();
     try {
+      recordAgentRunStatus(session, {
+        status: "running",
+        startedAt: nowIso(),
+      });
+      session.updatedAt = nowIso();
+      await queueSaveState();
+
       progress.note(`Starting ${AGENT_LABEL} run`);
       void channel
         .sendTyping?.()
@@ -5129,8 +5648,8 @@ async function runAgentAndPostToDiscord({
       let result;
       const claudeModelPlan =
         CONFIG.agentProvider === "claude" ? selectClaudeModelForRun(userPrompt, runLabel) : null;
-      let activeClaudeModel = claudeModelPlan ? claudeModelPlan.selectedModel : "";
-      let usedClaudeFallback = false;
+      activeClaudeModel = claudeModelPlan ? claudeModelPlan.selectedModel : "";
+      usedClaudeFallback = false;
       if (claudeModelPlan) {
         progress.note(
           `Claude model selected: ${activeClaudeModel || "default"} (${claudeModelPlan.strategy})`
@@ -5239,6 +5758,42 @@ async function runAgentAndPostToDiscord({
             runErr = fallbackErr;
           }
         }
+        if (
+          !result &&
+          CONFIG.agentProvider === "codex" &&
+          firstPrompt &&
+          CONFIG.codexTransientRetryEnabled &&
+          CONFIG.codexTransientRetryMax > 0 &&
+          isTransientCodexRuntimeError(runErr)
+        ) {
+          for (let attempt = 1; attempt <= CONFIG.codexTransientRetryMax && !result; attempt += 1) {
+            codexTransientRetriesUsed = attempt;
+            logRelayEvent("agent.run.retry_codex_transient", {
+              conversationKey,
+              provider: CONFIG.agentProvider,
+              sessionId: session.threadId || null,
+              attempt,
+              maxAttempts: CONFIG.codexTransientRetryMax,
+              error: cleanProgressText(codexErrorMessage(runErr), 220),
+            });
+            progress.note(
+              `Codex run failed with a likely transient error; retrying (${attempt}/${CONFIG.codexTransientRetryMax})`
+            );
+            try {
+              result = await runAgent(
+                session,
+                firstPrompt.prompt,
+                runEnv,
+                (line) => progress.note(line),
+                conversationKey,
+                { modelOverride: activeClaudeModel }
+              );
+            } catch (retryErr) {
+              runErr = retryErr;
+              if (!isTransientCodexRuntimeError(runErr)) break;
+            }
+          }
+        }
         if (!result) {
           if (CONFIG.agentProvider === "claude" && isClaudeQuotaLimitedError(runErr)) {
             const detail = String((runErr && runErr.message) || runErr || "").slice(0, 300);
@@ -5283,6 +5838,11 @@ async function runAgentAndPostToDiscord({
           `Note: Claude heavy-model quota was limited, so the relay retried with \`${activeClaudeModel}\`.\n\n` +
           (result.text || "");
       }
+      if (codexTransientRetriesUsed > 0) {
+        result.text =
+          `Note: Codex hit a likely transient connectivity/runtime failure and the relay auto-retried ${codexTransientRetriesUsed} time(s).\n\n` +
+          (result.text || "");
+      }
 
       session.threadId = result.threadId || session.threadId;
       if (contextInjected) session.contextVersion = CONFIG.contextVersion;
@@ -5296,6 +5856,7 @@ async function runAgentAndPostToDiscord({
         sessionId: session.threadId || null,
         model: activeClaudeModel || null,
         quotaFallback: usedClaudeFallback,
+        transientRetries: codexTransientRetriesUsed,
         resultChars: (result.text || "").length,
         reason: runLabel,
       });
@@ -5368,13 +5929,25 @@ async function runAgentAndPostToDiscord({
           CONFIG.agentProvider === "claude" && activeClaudeModel ? `, model ${activeClaudeModel}` : "";
         const actionsLabel = relayActions.length > 0 ? `, actions ${relayActions.length}` : "";
         const uploadsLabel = uploadPaths.length > 0 ? `, uploads ${uploadPaths.length}` : "";
+        const retriesLabel =
+          codexTransientRetriesUsed > 0 ? `, transient retries ${codexTransientRetriesUsed}` : "";
         try {
           await channel.send(
-            `Run status: completed (duration ${durationLabel}, session ${sessionLabel}${modelLabel}, reply ${answer.length} chars${actionsLabel}${uploadsLabel})`
+            `Run status: completed (duration ${durationLabel}, session ${sessionLabel}${modelLabel}, reply ${answer.length} chars${actionsLabel}${uploadsLabel}${retriesLabel})`
           );
         } catch {}
       }
 
+      recordAgentRunStatus(session, {
+        status: null,
+        provider: null,
+        reason: null,
+        queuedAt: null,
+        startedAt: null,
+        pendingMessageId: null,
+      });
+      session.updatedAt = nowIso();
+      await queueSaveState();
       return { ok: true, threadId: session.threadId || null, text: answer };
     } catch (err) {
       await progress.stop();
@@ -5406,12 +5979,26 @@ async function runAgentAndPostToDiscord({
         const modelLabel =
           CONFIG.agentProvider === "claude" && activeClaudeModel ? `, model ${activeClaudeModel}` : "";
         const shortErr = cleanProgressText(detail, 120) || "unknown error";
+        const transientHint =
+          CONFIG.agentProvider === "codex" && isTransientCodexRuntimeError(err)
+            ? ", likely transient connectivity/proxy issue"
+            : "";
         try {
           await channel.send(
-            `Run status: failed (duration ${durationLabel}, session ${sessionLabel}${modelLabel}, error ${shortErr})`
+            `Run status: failed (duration ${durationLabel}, session ${sessionLabel}${modelLabel}, error ${shortErr}${transientHint})`
           );
         } catch {}
       }
+      recordAgentRunStatus(session, {
+        status: null,
+        provider: null,
+        reason: null,
+        queuedAt: null,
+        startedAt: null,
+        pendingMessageId: null,
+      });
+      session.updatedAt = nowIso();
+      await queueSaveState();
       return { ok: false, error: detail };
     }
   });
@@ -5690,15 +6277,6 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
   ensureTasksShape(session);
   ensureTaskLoopShape(session);
 
-  const summarizeCounts = () => {
-    const counts = { pending: 0, running: 0, done: 0, failed: 0, blocked: 0, canceled: 0 };
-    for (const t of session.tasks || []) {
-      if (!t || typeof t !== "object") continue;
-      if (counts[t.status] != null) counts[t.status] += 1;
-    }
-    return counts;
-  };
-
   try {
     while (true) {
       const r = taskRunnerByConversation.get(conversationKey);
@@ -5718,6 +6296,12 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
       session.updatedAt = nowIso();
       await queueSaveState();
       logRelayEvent("task.started", { conversationKey, taskId: task.id, attempts: task.attempts });
+      try {
+        const taskLabel = taskDisplayDescription(task, 100) || "(no description)";
+        await channel.send(
+          `[TASK ${task.id}] started${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}`
+        );
+      } catch {}
 
       const wrapper = [
         `[TASK ${task.id}]`,
@@ -5789,6 +6373,20 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
 
       session.updatedAt = nowIso();
       await queueSaveState();
+      try {
+        const taskLabel = taskDisplayDescription(task, 100) || "(no description)";
+        if (res.ok) {
+          const detail = task.lastResultPreview ? ` | ${taskTextPreview(task.lastResultPreview, 120)}` : "";
+          await channel.send(
+            `[TASK ${task.id}] ${task.status}${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}${detail}`
+          );
+        } else {
+          const detail = task.lastError ? ` | error: ${taskTextPreview(task.lastError, 120)}` : "";
+          await channel.send(
+            `[TASK ${task.id}] ${task.status}${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}${detail}`
+          );
+        }
+      } catch {}
 
       if (CONFIG.handoffAutoAfterEachTask) {
         await runAutoHandoff({
@@ -5818,7 +6416,7 @@ async function kickTaskRunner(conversationKey, channel, session, meta) {
     session.updatedAt = nowIso();
     await queueSaveState();
     taskRunnerByConversation.delete(conversationKey);
-    const counts = summarizeCounts();
+    const counts = summarizeTaskCounts(session.tasks);
     try {
       if (CONFIG.tasksSummaryAfterRun) {
         await channel.send(
@@ -6093,7 +6691,7 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/handoff` - write repo handoff/working-memory update (optional git commit/push)",
         "`/research <subcmd>` - research manager (start/status/run/step/pause/stop/note)",
         "`/auto <subcmd>` - per-conversation automation toggles (actions/research on|off)",
-        "`/go <task...>` - queue task + handoff-update task, then run immediately",
+        "`/go <task...>` - queue and run immediately (long-run requests auto-wrap into job_start/watch callback mode)",
         "`/overnight <start|status|stop>` - one-command research loop control",
       ].join("\n")
     );
@@ -6102,10 +6700,18 @@ async function handleCommand(message, session, command, conversationKey) {
 
   if (command.name === "status") {
     ensureResearchShape(session);
+    ensureTasksShape(session);
+    ensureTaskLoopShape(session);
+    ensureJobsShape(session);
     const key = conversationKey || getConversationKey(message);
     const uploadDir = getConversationUploadDir(key);
+    const isRunning = queueByConversation.has(key);
     const sessionContextVersion = getSessionContextVersion(session);
     const researchRoot = session.research && session.research.projectRoot ? String(session.research.projectRoot) : "";
+    const taskCounts = summarizeTaskCounts(session.tasks);
+    const runningJob = findLatestJob(session, { requireRunning: true });
+    const runningJobElapsed = runningJob ? formatElapsed(Date.now() - (Date.parse(runningJob.startedAt || "") || Date.now())) : "";
+    const runningJobDesc = runningJob ? jobDisplayDescription(runningJob, 80) : "";
     await message.reply(
       [
         `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
@@ -6113,6 +6719,11 @@ async function handleCommand(message, session, command, conversationKey) {
         `upload_dir: ${uploadDir}`,
         `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
         `research: enabled=${Boolean(session.research && session.research.enabled)} auto=${Boolean(session.auto && session.auto.research)} project=${researchRoot || "none"}`,
+        `tasks: pending=${taskCounts.pending} running=${taskCounts.running} done=${taskCounts.done} failed=${taskCounts.failed} blocked=${taskCounts.blocked} canceled=${taskCounts.canceled}`,
+        runningJob
+          ? `job: running \`${runningJob.id}\` elapsed=${runningJobElapsed}${runningJobDesc ? ` desc=${runningJobDesc}` : ""}`
+          : "job: none",
+        `queue: ${isRunning ? "busy (request in progress)" : "idle"}`,
       ].join("\n")
     );
     return true;
@@ -6233,8 +6844,9 @@ async function handleCommand(message, session, command, conversationKey) {
       return true;
     }
 
+    const autoWrapLongTask = shouldAutoWrapGoLongTask(taskText);
     const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
-    const requiredSlots = 2;
+    const requiredSlots = autoWrapLongTask ? 1 : 2;
     if (CONFIG.tasksMaxPending > 0 && pending + requiredSlots > CONFIG.tasksMaxPending) {
       await message.reply(
         `Task queue does not have room for /go (pending=${pending}, needs=${requiredSlots}, max=${CONFIG.tasksMaxPending}).`
@@ -6242,9 +6854,19 @@ async function handleCommand(message, session, command, conversationKey) {
       return true;
     }
 
-    const primaryTask = createTask(session, taskText);
-    const handoffTask = createTask(session, buildGoHandoffTaskText());
-    session.tasks.push(primaryTask, handoffTask);
+    const primaryTask = createTask(
+      session,
+      autoWrapLongTask ? buildGoLongTaskCallbackTaskText(taskText) : taskText,
+      {
+        description: autoWrapLongTask ? `Launch/watch long run: ${taskText}` : taskText,
+      }
+    );
+    let handoffTask = null;
+    session.tasks.push(primaryTask);
+    if (!autoWrapLongTask) {
+      handoffTask = createTask(session, buildGoHandoffTaskText());
+      session.tasks.push(handoffTask);
+    }
     session.updatedAt = nowIso();
     await queueSaveState();
 
@@ -6256,7 +6878,12 @@ async function handleCommand(message, session, command, conversationKey) {
     await sendLongReply(
       message,
       [
-        `Queued /go tasks: \`${primaryTask.id}\` then \`${handoffTask.id}\`.`,
+        handoffTask
+          ? `Queued /go tasks: \`${primaryTask.id}\` then \`${handoffTask.id}\`.`
+          : `Queued /go task: \`${primaryTask.id}\` (auto long-run callback mode).`,
+        autoWrapLongTask
+          ? `Long-run auto-wrap enabled (watch everySec=${CONFIG.goLongTaskWatchEverySec}, tailLines=${CONFIG.goLongTaskTailLines}, runTasks=true).`
+          : "Standard /go mode (task + handoff update).",
         runRes && runRes.started ? "Task runner started." : "Task runner was already active.",
         "Monitor with `/task list` and `/status`.",
       ].join("\n")
@@ -6960,7 +7587,7 @@ async function handleCommand(message, session, command, conversationKey) {
       session.updatedAt = nowIso();
       await queueSaveState();
       logRelayEvent("task.added", { conversationKey: conversationKey || null, taskId: task.id });
-      await message.reply(`Queued task \`${task.id}\`: ${taskTextPreview(task.text, 80)}`);
+      await message.reply(`Queued task \`${task.id}\`: ${taskDisplayDescription(task, 80) || taskTextPreview(task.text, 80)}`);
       return true;
     }
 
@@ -6979,7 +7606,11 @@ async function handleCommand(message, session, command, conversationKey) {
       const maxLines = 28;
       const show = session.tasks.slice(0, maxLines);
       for (const t of show) {
-        lines.push(`- ${t.id} [${t.status}] ${taskTextPreview(t.text, 80)}`);
+        const label = taskDisplayDescription(t, 80) || "(no description)";
+        const promptPreview = taskTextPreview(t.text, 80);
+        const promptSuffix = promptPreview && label !== promptPreview ? ` | prompt: ${promptPreview}` : "";
+        const originSuffix = t.sourceJobId ? ` | source: ${t.sourceJobId}` : "";
+        lines.push(`- ${t.id} [${t.status}] ${label}${originSuffix}${promptSuffix}`);
       }
       if (session.tasks.length > show.length) {
         lines.push(`- ... (${session.tasks.length - show.length} more)`);
@@ -7038,6 +7669,66 @@ async function handleCommand(message, session, command, conversationKey) {
     }
 
     await message.reply("Usage: `/task add|list|run|stop|clear`");
+    return true;
+  }
+
+  if (command.name === "job") {
+    ensureJobsShape(session);
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = subRaw.toLowerCase();
+
+    if (!sub || sub === "list") {
+      const jobs = Array.isArray(session.jobs) ? session.jobs : [];
+      if (!jobs.length) {
+        await message.reply("job: no jobs recorded.");
+        return true;
+      }
+      const lines = [];
+      const now = Date.now();
+      const show = jobs.slice(-20); // most recent 20
+      for (const j of show) {
+        const elapsed =
+          j.status === "running"
+            ? ` elapsed=${formatElapsed(now - (Date.parse(j.startedAt || "") || now))}`
+            : j.finishedAt
+            ? ` elapsed=${formatElapsed((Date.parse(j.finishedAt) || now) - (Date.parse(j.startedAt || "") || now))}`
+            : "";
+        const exitStr = j.exitCode != null ? ` exit=${j.exitCode}` : "";
+        const desc = jobDisplayDescription(j, 60);
+        lines.push(`- ${j.id} [${j.status}]${elapsed}${exitStr}${desc ? ` | ${desc}` : ""}`);
+      }
+      if (jobs.length > show.length) {
+        lines.unshift(`(showing last ${show.length} of ${jobs.length} jobs)`);
+      }
+      await sendLongReply(message, lines.join("\n"));
+      return true;
+    }
+
+    if (sub === "logs") {
+      const jobId = String(rest || "").trim();
+      const jobs = Array.isArray(session.jobs) ? session.jobs : [];
+      const job = jobId
+        ? jobs.find((j) => j && j.id === jobId)
+        : jobs.slice().reverse().find((j) => j && typeof j === "object");
+      if (!job) {
+        await message.reply(jobId ? `job: no job found with id \`${jobId}\`.` : "job: no jobs recorded.");
+        return true;
+      }
+      const logPath = job.logPath;
+      if (!logPath) {
+        await message.reply(`job \`${job.id}\`: no log path recorded.`);
+        return true;
+      }
+      const tail = await readTailLines(logPath, 60, 128 * 1024);
+      if (!tail) {
+        await message.reply(`job \`${job.id}\`: log is empty or not yet written (${logPath}).`);
+        return true;
+      }
+      await sendLongReply(message, `job \`${job.id}\` [${job.status}] log (last 60 lines):\n${tail}`);
+      return true;
+    }
+
+    await message.reply("Usage: `/job list` | `/job logs [<id>]`");
     return true;
   }
 
@@ -7361,6 +8052,11 @@ async function main() {
       tickSec: CONFIG.researchTickSec,
       maxParallel: CONFIG.researchTickMaxParallel,
     });
+    notifyInterruptedAgentRuns(client).catch((err) =>
+      logRelayEvent("agent.run.interrupted_notice.bootstrap_error", {
+        error: String(err && err.message ? err.message : err).slice(0, 240),
+      })
+    );
   });
 
   client.on("messageCreate", async (message) => {
@@ -7439,35 +8135,10 @@ async function main() {
             return;
           }
         }
-        // `/task stop` must be responsive; handle it outside the per-conversation queue so
-        // it can kill an in-flight child process immediately.
-        if (command.name === "task") {
-          const { head: subRaw } = splitFirstToken(command.arg);
-          if (subRaw && subRaw.toLowerCase() === "stop") {
-            requestStopConversation(key, session);
-            await message.reply("Stop requested.");
-            return;
-          }
-        }
-        // `/status` bypasses the queue so it always responds immediately, even if a long
-        // agent run or /plan generation is in progress.
-        if (command.name === "status") {
-          ensureResearchShape(session);
-          const isRunning = queueByConversation.has(key);
-          const uploadDir = getConversationUploadDir(key);
-          const sessionContextVersion = getSessionContextVersion(session);
-          const researchRoot = session.research && session.research.projectRoot ? String(session.research.projectRoot) : "";
-          const lines = [
-            `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
-            `workdir: ${session.workdir || CONFIG.defaultWorkdir}`,
-            `upload_dir: ${uploadDir}`,
-            `context_bootstrap: enabled=${CONFIG.contextEnabled} every_turn=${CONFIG.contextEveryTurn} target_version=${CONFIG.contextVersion} session_version=${sessionContextVersion}`,
-            `research: enabled=${Boolean(session.research && session.research.enabled)} auto=${Boolean(
-              session.auto && session.auto.research
-            )} project=${researchRoot || "none"}`,
-            `queue: ${isRunning ? "busy (request in progress)" : "idle"}`,
-          ];
-          await message.reply(lines.join("\n"));
+        // Read-only status/introspection commands bypass the per-conversation queue so they
+        // remain responsive while long requests are in progress.
+        if (shouldBypassConversationQueue(command)) {
+          await handleCommand(message, session, command, key);
           return;
         }
         await enqueueConversation(key, async () => handleCommand(message, session, command, key));

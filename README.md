@@ -1,302 +1,151 @@
-# OpenClaw + Codex Discord + Skills Kit
+# VibeResearch_toolkit
 
-Portable setup kit for:
-- OpenClaw Gateway + dashboard
-- OpenClaw Discord channel (optional)
-- Proxy env (China/GFW)
-- Direct Discord -> Codex CLI relay (so you can vibe code from iPhone)
-- Reusable local Codex skills (packaged + installable)
+A Discord-native research operations toolkit for ML experimentation with Codex/Claude agents.
 
-Repository rename note:
-- Canonical repo name is now `openclaw-codex-discord-skills-kit`.
-- Previous name `openclaw-codex-discord-kit` may still work via GitHub redirect.
+This repository combines:
+- Discord relay orchestration (`codex-discord-relay`)
+- human-in-the-loop research workflows (plan/task/worktree/handoff)
+- callback-driven long-running experiment handling
+- packaged skills for hypothesis-driven ML research
 
-## Quick Start (new machine, one-shot)
+## Stable Release
 
-1. Clone repo:
+- Current stable release: `v1.0.0`
+- Release metadata:
+  - `VERSION`
+  - `CHANGELOG.md`
+
+## Why This Is Built For ML Researchers
+
+Most agent tooling optimizes for one-shot automation. Research work is iterative, uncertain, and hypothesis-driven.
+
+`VibeResearch_toolkit` is designed for that reality:
+- **Research from anywhere**: Discord-first control plane lets you run and monitor from desktop or mobile.
+- **Interactive by default**: you can inspect intermediate results, redirect, and refine hypotheses before committing compute.
+- **Relay Callback design**: long jobs can auto-enqueue analysis tasks on completion, so experiments continue without manual babysitting.
+- **Hypothesis-driven skill stack**: bundled skills bias toward discriminative experiments and structured ablations, not trivial “try random settings” loops.
+- **Parallel experiment isolation**: git worktrees make branch-per-hypothesis and parallel ablations clean and reversible.
+- **Persistent research memory**: `WORKING_MEMORY.md` + append-only `HANDOFF_LOG.md` preserve continuity across agents/sessions.
+- **Operational observability**: `/status`, `/task list`, `/job list`, logs, and callback traces expose real run state.
+- **Reproducible machine state**: export/apply scripts keep relay + env setup portable across machines.
+
+## Core Design Principles
+
+1. **Human-in-the-loop over full autopilot**
+   - Keep the researcher in control at each decision boundary.
+2. **One-hypothesis-at-a-time discipline**
+   - Prefer high-signal experiments that disambiguate what to do next.
+3. **Evidence-backed continuity**
+   - Every major action should leave a trace in logs and handoff artifacts.
+4. **Reliable long-run execution**
+   - Queue-safe relay behavior, background jobs, and callback follow-ups are first-class.
+
+## Quick Start (New Machine)
+
+1. Clone and enter repo:
 
 ```bash
-git clone <your-repo-url>
-cd openclaw-codex-discord-skills-kit
+git clone https://github.com/MachengShen/VibeResearch_toolkit.git
+cd VibeResearch_toolkit
 ```
 
-2. Create config (secrets live here, never committed):
+2. Create config:
 
 ```bash
 cp config/setup.env.example config/setup.env
 $EDITOR config/setup.env
 ```
 
-Minimum fields to set:
-- `CODEX_DISCORD_BOT_TOKEN` (required)
-- `OPENCLAW_PROXY_URL` (recommended if Discord/OpenAI/Gemini/etc are blocked; example `http://127.0.0.1:7897`)
+Minimum required:
+- `CODEX_DISCORD_BOT_TOKEN`
 
-Optional:
-- `OPENCLAW_DISCORD_BOT_TOKEN` (only if you also want OpenClaw to respond on Discord)
-- `OPENCLAW_DISCORD_GUILD_ID` / `OPENCLAW_DISCORD_CHANNEL_ID` (to allowlist where OpenClaw replies)
-- `CODEX_ALLOWED_GUILDS` / `CODEX_ALLOWED_CHANNELS` (to restrict where the Codex relay replies in servers)
+Recommended:
+- `OPENCLAW_PROXY_URL` (if your network needs proxy routing)
 
-3. Run bootstrap as root (installs watchdog scripts + cron):
+3. Bootstrap:
 
 ```bash
 sudo ./bootstrap.sh
 ```
 
-## What gets installed
-
-Bootstrap installs:
-
-- `/usr/local/bin/openclaw-gateway-ensure.sh`
-- `/usr/local/bin/codex-discord-relay-ensure.sh`
-- `/usr/local/bin/codex-discord-relayctl`
-- `/usr/local/bin/codex-discord-relay-ensure-multi.sh`
-- `/usr/local/bin/codex-discord-relay-multictl`
-- `/usr/local/bin/openclaw-kit-autoupdate.sh`
-- `/etc/cron.d/openclaw-state-sync` (optional; only when `OPENCLAW_STATE_SYNC_CRON_ENABLED=true`)
-- `/etc/systemd/system/openclaw-kit-autoupdate.service`
-- `/etc/systemd/system/openclaw-kit-autoupdate.timer`
-- Cron entries for gateway + relay ensure scripts (`@reboot` + periodic ensure)
-- Proxy env at `/root/.openclaw/proxy.env` (or `$OPENCLAW_STATE_DIR/proxy.env`) sourced by ensure scripts and autoupdate script
-- Packaged custom skills from `packaged-skills/codex/*` installed into `$CODEX_HOME/skills` (default `~/.codex/skills`)
-- Optional machine-state snapshot under `machine-state/` for reproducible host migration
-
-Relay multi-instance state layout:
-
-- Default relay state: `/root/.codex-discord-relay`
-- Extra instance env files: `/root/.codex-discord-relay/instances.d/<name>.env`
-- Extra instance state dirs: `/root/.codex-discord-relay/instances/<name>/`
-
-## How It Works (Discord)
-
-- **Codex relay bot**:
-  - Replies in DMs.
-  - Replies in servers only when mentioned (and optionally restricted by allowlists).
-  - Maintains separate Codex `thread_id` per Discord context (DM vs channel vs thread).
-  - Supports `/attach <thread_id>` (DM-only by default) to link an existing Codex session to a Discord context.
-
-- **OpenClaw Discord bot** (optional):
-  - Separate from the Codex relay bot if you want; recommended to avoid duplicate replies.
-
-## Verify/Operate
+4. Verify:
 
 ```bash
-openclaw gateway health
-openclaw status
 codex-discord-relayctl status
 codex-discord-relayctl logs
-
-codex-discord-relay-multictl list
-codex-discord-relay-multictl logs default
-
-# Auto-update service
-systemctl status openclaw-kit-autoupdate.timer --no-pager
-systemctl list-timers --all | rg openclaw-kit-autoupdate
-tail -n 120 /var/log/openclaw-kit-autoupdate.log
-
-# If systemd is unavailable (container/minimal init), fallback cron is used:
-cat /etc/cron.d/openclaw-kit-autoupdate
-
-# Packaged skills:
-bash ./scripts/install_packaged_skills.sh --list
-ls -la "${CODEX_HOME:-$HOME/.codex}/skills"
-
-# Full verification:
-bash ./scripts/verify_install.sh
-
-# Repository lint (syntax + packaged skills metadata):
-bash ./scripts/lint_repo.sh
-
-# Export current host settings into repo snapshot (safe/redacted):
-bash ./scripts/export_local_state.sh --no-secrets
-
-# Apply snapshot onto a fresh machine:
-sudo bash ./scripts/apply_local_state.sh --no-secrets
-
-# One-shot machine -> repo sync + commit:
-bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push false
 ```
 
-## Global Agent Context Templates
+Then DM your relay bot in Discord and run `/status`.
 
-Templates for global context files that every agent reads automatically.
+## Daily Research Workflow
 
-By default, `bootstrap.sh` now installs these templates automatically to `/root`:
-- `/root/AGENTS.md`
-- `/root/.claude/CLAUDE.md`
-- `/root/AGENT_SYSTEM_OVERVIEW.md`
-
-Manual copy commands (optional) are still available:
-
-```bash
-# For Claude (reads ~/.claude/CLAUDE.md on every session)
-cp templates/global-context/CLAUDE.md ~/.claude/CLAUDE.md
-
-# For Codex (reads ~/AGENTS.md on every session)
-cp templates/global-context/AGENTS.md ~/AGENTS.md
-
-# Shared quick system overview for both agents
-cp templates/global-context/AGENT_SYSTEM_OVERVIEW.md ~/AGENT_SYSTEM_OVERVIEW.md
-```
-
-These files tell both agents about:
-- Speech-to-text phonetic error tolerance
-- The dual-agent ecosystem (Claude + Codex) and skill paths
-- Global work log / handoff log policy
-- Relay infrastructure and key paths
-
-Edit after copying to adjust any machine-specific paths.
-
-Global-context bootstrap toggles in `config/setup.env`:
-- `OPENCLAW_INSTALL_GLOBAL_CONTEXT=true|false` (default `true`)
-- `OPENCLAW_GLOBAL_CONTEXT_OVERWRITE=true|false` (default `false`)
-- `OPENCLAW_GLOBAL_CONTEXT_TARGET_HOME=/absolute/path` (default `/root`)
-
-## Packaged Skills
-
-This repo bundles reusable local skills under:
-
-**Codex / Claude skills** (`packaged-skills/codex/`) — installed by `install_packaged_skills.sh`:
-
-- `packaged-skills/codex/codex-discord-relay-stuck-check`
-- `packaged-skills/codex/discord-image-upload`
-- `packaged-skills/codex/openclaw-media-send`
-- `packaged-skills/codex/periodic-mechanistic-service`
-- `packaged-skills/codex/relay-long-task-callback`
-- `packaged-skills/codex/system-setup-context-awareness`
-- `packaged-skills/codex/ml-run-monitor-decider`
-- `packaged-skills/codex/experiment-working-memory-handoff`
-- `packaged-skills/codex/gpu-training-takeover`
-- `packaged-skills/codex/ml-ablation-five-step-loop`
-
-**OpenClaw-specific skills** (`packaged-skills/openclaw/`) — require OpenClaw's `sessions_spawn` API or OpenClaw skill config; not installed by default:
-
-- `packaged-skills/openclaw/delegate-coding-tasks`
-- `packaged-skills/openclaw/tavily-search`
-
-Install/update bundled skills with one command:
-
-```bash
-bash ./scripts/install_packaged_skills.sh
-```
-
-Useful options:
-
-```bash
-# only install selected skills
-bash ./scripts/install_packaged_skills.sh --only "discord-image-upload,openclaw-media-send"
-
-# do not overwrite existing installed skills
-bash ./scripts/install_packaged_skills.sh --overwrite false
-
-# preview actions
-bash ./scripts/install_packaged_skills.sh --dry-run
-```
-
-## Auto-Update Config
-
-Set these in `config/setup.env` before bootstrap:
-
-- `OPENCLAW_KIT_AUTOUPDATE_ENABLED=true|false`
-- `OPENCLAW_KIT_AUTOUPDATE_CALENDAR` (default `daily`, supports systemd `OnCalendar` syntax)
-- `OPENCLAW_KIT_AUTOUPDATE_RANDOMIZED_DELAY` (default `30m`)
-- `OPENCLAW_KIT_AUTOUPDATE_PERSISTENT` (default `true`)
-- `OPENCLAW_KIT_AUTOUPDATE_CRON` (fallback cron schedule, used only when systemd is unavailable; default `17 3 * * *`)
-
-Example cadences:
-
-- Daily: `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=daily`
-- Every 3 days (03:00): `OPENCLAW_KIT_AUTOUPDATE_CALENDAR=*-*-1,4,7,10,13,16,19,22,25,28 03:00:00`
-
-## Machine-State Sync (Settings Back To Repo)
-
-`openclaw-kit-autoupdate.sh` updates this host from git and re-runs deployment scripts.  
-It does **not** push local machine settings back into the repository.
-
-For machine -> repo sync, use:
-
-```bash
-# Redacted snapshot + local skill packaging + commit
-bash ./scripts/sync_local_state_to_repo.sh --no-secrets --commit true --push false
-```
-
-To automate this direction, enable cron fallback in `config/setup.env`:
-
-- `OPENCLAW_STATE_SYNC_CRON_ENABLED=true`
-- `OPENCLAW_STATE_SYNC_CRON=5 3 * * *` (example; daily)
-
-Then run bootstrap (or directly run `scripts/install_local_state_sync_cron.sh`).
-
-## Bootstrap Optional Flags
-
-Bootstrap supports explicit snapshot-secret mode and global-context overrides:
-
-```bash
-sudo ./bootstrap.sh --no-secrets
-sudo ./bootstrap.sh --with-secrets
-sudo ./bootstrap.sh --no-global-context
-sudo ./bootstrap.sh --global-context-overwrite
-```
-
-Related env toggles:
-
-- `OPENCLAW_APPLY_SNAPSHOT_ON_BOOTSTRAP=true|false`
-- `OPENCLAW_EXPORT_SNAPSHOT_ON_BOOTSTRAP=true|false`
-- `OPENCLAW_SYNC_LOCAL_SKILLS_ON_BOOTSTRAP=true|false`
-- `OPENCLAW_INSTALL_GLOBAL_CONTEXT=true|false`
-- `OPENCLAW_GLOBAL_CONTEXT_OVERWRITE=true|false`
-- `OPENCLAW_GLOBAL_CONTEXT_TARGET_HOME=/absolute/path`
-
-## Relay Stall Triage (Quick)
-
-```bash
-# relay process + instance status
-codex-discord-relay-multictl list
-pgrep -af "codex-discord-relay/relay.js" || true
-
-# look for long-running/hung codex child jobs
-pgrep -af "codex .*exec" || true
-
-# inspect logs
-tail -n 200 /root/.codex-discord-relay/relay.log
-```
-
-Common signals:
-
-- `ETIMEDOUT ...:443` -> proxy/network path issue (check `/root/.openclaw/proxy.env`).
-- `Cannot find module 'node:fs'` or `node:fs/promises` -> old Node runtime was used.
-- `Working...` message stops updating while a `codex exec` process is still alive -> queue is blocked by a hung run; restart relay from SSH.
-
-## Long-Run Training Callback Workflow
-
-Use this for "start now, analyze later" training jobs from Discord.
-
-1. Set workdir in the thread:
-   - `/workdir /root/<repo>`
-2. Add one task that explicitly invokes the packaged skill:
-   - `/task add Use skill relay-long-task-callback. Launch <training command>. Watch everySec=120 tailLines=80. thenTask="Analyze final log <path> and summarize metrics + next steps."`
-3. Start task runner:
+1. Set project workdir in Discord:
+   - `/workdir /absolute/path/to/project`
+2. Plan the next hypothesis test:
+   - `/plan Design an experiment to test <hypothesis>; include metrics and stop criteria`
+3. Execute with task queue:
+   - `/plan apply last --confirm`
    - `/task run`
+4. Launch long runs with callback where needed (`job_start + watch + thenTask`).
+5. Inspect results and update memory:
+   - `/handoff --commit` (optional)
 
-Notes:
-- `/task add` is recommended for queue control (`/task list`, `/task stop`), but plain natural-language prompting can also work if the agent emits valid `[[relay-actions]]` JSON.
-- `/auto actions on` is usually unnecessary if global relay actions are already enabled and this conversation did not disable them.
+## Relay Callback Pattern (Why it matters)
 
-## GPU Queue Gate Script
+For long training/eval/sweep jobs, use relay actions so completion triggers analysis automatically.
 
-For shared single-GPU hosts, use the bundled queue gate wrapper to serialize runs:
-
-```bash
-bash ./scripts/gpu_gate.sh -n experiment_a -t 6h -- \
-  python train.py --config configs/exp_a.yaml
+```text
+[[relay-actions]]
+{"actions":[{"type":"job_start","description":"maze2d ablation seed=1","command":"bash scripts/run_ablation_seed1.sh","watch":{"everySec":120,"tailLines":80,"thenTask":"Analyze logs/maze2d_seed1.log and summarize final metrics, failures, and next experiment.","thenTaskDescription":"Analyze maze2d seed=1 results","runTasks":true}}]}
+[[/relay-actions]]
 ```
 
-Behavior:
-- Uses a lock file (default `/tmp/codex_gpu0.lock`) so only one job runs at a time.
-- Writes run logs to `/root/gpu-queue-logs` by default (override with `--log-dir` or `GPU_GATE_LOG_DIR`).
-- Enforces timeout (`-t/--timeout`) and emits structured status lines (`status`, `exit_code`, `log`).
+This avoids dead time between run completion and interpretation.
 
-## Notes
+## Command Surface (Most Used)
 
-- Secrets are never committed. Put them in `config/setup.env` (and rotate any token you pasted into chats/logs).
-- If Discord is blocked, set `OPENCLAW_PROXY_URL` to your local proxy (e.g. Clash `http://127.0.0.1:7897`).
-- If you want this repo to be publicly cloneable, keep it public but never add `config/setup.env` (it is gitignored).
+- `/status` — active run, queue state, task summary
+- `/task add|list|run|stop|clear` — persistent execution queue
+- `/job list` and `/job logs <id>` — background job history and logs
+- `/plan new|list|show|apply` — plan-first workflow
+- `/worktree new|use|list|rm` — isolate parallel experiments
+- `/handoff` — update continuity artifacts
+- `/context` — inspect prompt context/memory injection state
+
+## Documentation
+
+- User manual: `docs/USER_MANUAL.md`
+- ML design guide: `docs/ML_RESEARCH_DESIGN.md`
+- Rename/migration guide: `docs/REPO_RENAME_AND_MIGRATION.md`
+- Working memory snapshot: `docs/WORKING_MEMORY.md`
+- Chronological handoff history: `HANDOFF_LOG.md`
+
+## Repository Rename Status
+
+This toolkit is being rebranded from `openclaw-codex-discord-skills-kit` to `VibeResearch_toolkit`.
+
+Compatibility is maintained where possible via fallback paths in scripts. Use the migration guide for clean cutover:
+- `docs/REPO_RENAME_AND_MIGRATION.md`
+
+## Development / CI
+
+Run local lint:
+
+```bash
+bash scripts/lint_repo.sh
+```
+
+CI (`.github/workflows/ci.yml`) runs the same lint on every push and pull request.
+
+Lint enforces publishability invariants:
+- Bash headers and strict mode (`#!/usr/bin/env bash`, `set -euo pipefail`)
+- Node shebang hygiene (`#!/usr/bin/env node`)
+- `bash -n` shell syntax checks
+- CRLF rejection on `.sh`/`.js`
+- packaged skill metadata checks
+
+## Security Notes
+
+- Never commit real tokens/secrets.
+- Keep workdir allowlists tight.
+- Prefer explicit confirm flags for high-impact automation in shared channels.

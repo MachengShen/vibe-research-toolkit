@@ -1,12 +1,12 @@
-# VibeResearch_toolkit User Manual
+# vibe-research-toolkit User Manual
 
 This manual is for researchers running experiments through the Discord relay + agent stack in this repo.
 
-Stable reference release: `v1.0.0`.
+Stable reference release: `v1.0.1`.
 
 ## 1) What you get
 
-`VibeResearch_toolkit` provides:
+`vibe-research-toolkit` provides:
 - Discord-to-agent relay (Codex/Claude)
 - persistent session/workdir state per Discord context
 - plan/task/worktree operations for structured research execution

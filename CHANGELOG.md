@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `VibeResearch_toolkit` are documented in this file.
+All notable changes to `vibe-research-toolkit` are documented in this file.
 
 ## [Unreleased]
 
@@ -38,7 +38,7 @@ All notable changes to `VibeResearch_toolkit` are documented in this file.
   - packaged skill metadata checks
 
 ### Changed
-- Path defaults/templates now prefer `/root/VibeResearch_toolkit` with legacy fallback support.
+- Path defaults/templates now prefer `/root/vibe-research-toolkit` with legacy fallback support.
 - `bootstrap.sh` and `scripts/apply_local_state.sh` now allow `--help` without root.
 
 ### Research-focused highlights

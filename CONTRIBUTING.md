@@ -1,14 +1,14 @@
 # Contributing
 
-Thanks for contributing to `VibeResearch_toolkit`.
+Thanks for contributing to `vibe-research-toolkit`.
 
 ## Development setup
 
 1. Clone the repository and enter it:
 
 ```bash
-git clone https://github.com/MachengShen/VibeResearch_toolkit.git
-cd VibeResearch_toolkit
+git clone https://github.com/MachengShen/vibe-research-toolkit.git
+cd vibe-research-toolkit
 ```
 
 2. Run the repository lint checks:

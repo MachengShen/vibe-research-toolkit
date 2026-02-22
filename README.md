@@ -1,4 +1,4 @@
-# VibeResearch_toolkit
+# vibe-research-toolkit
 
 A Discord-native research operations toolkit for ML experimentation with Codex/Claude agents.
 
@@ -10,7 +10,7 @@ This repository combines:
 
 ## Stable Release
 
-- Current stable release: `v1.0.0`
+- Current stable release: `v1.0.1`
 - Release metadata:
   - `VERSION`
   - `CHANGELOG.md`
@@ -19,7 +19,7 @@ This repository combines:
 
 Most agent tooling optimizes for one-shot automation. Research work is iterative, uncertain, and hypothesis-driven.
 
-`VibeResearch_toolkit` is designed for that reality:
+`vibe-research-toolkit` is designed for that reality:
 - **Research from anywhere**: Discord-first control plane lets you run and monitor from desktop or mobile.
 - **Interactive by default**: you can inspect intermediate results, redirect, and refine hypotheses before committing compute.
 - **Relay Callback design**: long jobs can auto-enqueue analysis tasks on completion, so experiments continue without manual babysitting.
@@ -45,8 +45,8 @@ Most agent tooling optimizes for one-shot automation. Research work is iterative
 1. Clone and enter repo:
 
 ```bash
-git clone https://github.com/MachengShen/VibeResearch_toolkit.git
-cd VibeResearch_toolkit
+git clone https://github.com/MachengShen/vibe-research-toolkit.git
+cd vibe-research-toolkit
 ```
 
 2. Choose an install track:

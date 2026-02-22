@@ -116,16 +116,8 @@ This avoids dead time between run completion and interpretation.
 
 - User manual: `docs/USER_MANUAL.md`
 - ML design guide: `docs/ML_RESEARCH_DESIGN.md`
-- Rename/migration guide: `docs/REPO_RENAME_AND_MIGRATION.md`
 - Working memory snapshot: `docs/WORKING_MEMORY.md`
 - Chronological handoff history: `HANDOFF_LOG.md`
-
-## Repository Rename Status
-
-This toolkit is being rebranded from `openclaw-codex-discord-skills-kit` to `VibeResearch_toolkit`.
-
-Compatibility is maintained where possible via fallback paths in scripts. Use the migration guide for clean cutover:
-- `docs/REPO_RENAME_AND_MIGRATION.md`
 
 ## Development / CI
 

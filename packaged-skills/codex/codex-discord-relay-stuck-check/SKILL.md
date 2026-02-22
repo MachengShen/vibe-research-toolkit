@@ -1,6 +1,7 @@
 ---
 name: codex-discord-relay-stuck-check
 description: "Use when Codex via Discord (codex-discord-relay) appears stuck/stalled: check relay health, watchdog restarts, proxy issues (GFW), and hung Codex runs; summarize cause and recovery steps."
+version: 1.0
 ---
 
 # Codex Discord Relay Stuck Check

@@ -1,6 +1,7 @@
 ---
 name: gpu-training-takeover
 description: "Use when inheriting an in-flight GPU training experiment stream: snapshot state, validate launch assumptions, monitor with appropriate cadence, make one-hypothesis-at-a-time decisions, and log concise handoff updates."
+version: 1.0
 ---
 
 # GPU Training Takeover

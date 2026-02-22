@@ -49,7 +49,28 @@ git clone https://github.com/MachengShen/VibeResearch_toolkit.git
 cd VibeResearch_toolkit
 ```
 
-2. Create config:
+2. Choose an install track:
+
+### Track A: Relay-only (no root)
+
+Use this when you only need the Discord relay process.
+
+```bash
+cd codex-discord-relay
+cp .env.example .env
+$EDITOR .env
+npm install
+node relay.js
+```
+
+Minimum required in `.env`:
+- `DISCORD_BOT_TOKEN`
+
+### Track B: Full bootstrap (system services, scripts, templates)
+
+Use this for a full machine setup.
+
+Create config:
 
 ```bash
 cp config/setup.env.example config/setup.env
@@ -62,13 +83,13 @@ Minimum required:
 Recommended:
 - `OPENCLAW_PROXY_URL` (if your network needs proxy routing)
 
-3. Bootstrap:
+Run bootstrap:
 
 ```bash
 sudo ./bootstrap.sh
 ```
 
-4. Verify:
+3. Verify:
 
 ```bash
 codex-discord-relayctl status
@@ -76,6 +97,19 @@ codex-discord-relayctl logs
 ```
 
 Then DM your relay bot in Discord and run `/status`.
+
+## Troubleshooting
+
+- Required env vars:
+  - relay-only track: `codex-discord-relay/.env` must include `DISCORD_BOT_TOKEN`
+  - full bootstrap track: `config/setup.env` should include `CODEX_DISCORD_BOT_TOKEN`
+- Logs:
+  - service logs: `codex-discord-relayctl logs`
+  - runtime logs: `/root/.codex-discord-relay/relay.log`
+- Discord bot permissions:
+  - verify bot is invited to the target server
+  - ensure it can view channels, read message history, send messages, and create/send thread replies where needed
+  - if using slash commands, re-install/sync application commands for the bot app if commands are missing
 
 ## Daily Research Workflow
 

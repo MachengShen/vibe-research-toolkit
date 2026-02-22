@@ -2,6 +2,27 @@
 
 All notable changes to `VibeResearch_toolkit` are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Open-source governance docs:
+  - `LICENSE` (MIT)
+  - `CONTRIBUTING.md`
+  - `SECURITY.md`
+
+### Changed
+- Public-safe defaults in `config/setup.env.example`:
+  - `RELAY_UPLOAD_ALLOW_OUTSIDE_CONVERSATION=false`
+  - `RELAY_UPLOAD_ALLOWED_ROOTS=/tmp`
+  - `CODEX_SANDBOX=workspace-write`
+  - `CODEX_APPROVAL_POLICY=on-request`
+- `README.md` now includes:
+  - relay-only install track (no root)
+  - full bootstrap track
+  - troubleshooting guidance (env vars, logs, Discord permissions)
+- `scripts/lint_repo.sh` now requires packaged skill frontmatter to include `version`.
+- Packaged skills now include explicit `version` in YAML frontmatter.
+
 ## [1.0.0] - 2026-02-22
 
 ### Added
@@ -9,7 +30,6 @@ All notable changes to `VibeResearch_toolkit` are documented in this file.
   - `README.md` reworked for ML research adoption
   - `docs/USER_MANUAL.md` operational manual
   - `docs/ML_RESEARCH_DESIGN.md` design rationale
-  - `docs/REPO_RENAME_AND_MIGRATION.md` migration playbook
 - CI lint workflow at `.github/workflows/ci.yml`.
 - Repository lint gate improvements in `scripts/lint_repo.sh`:
   - shell syntax checks across repository scripts
@@ -18,7 +38,6 @@ All notable changes to `VibeResearch_toolkit` are documented in this file.
   - packaged skill metadata checks
 
 ### Changed
-- Rebrand direction from `openclaw-codex-discord-skills-kit` to `VibeResearch_toolkit`.
 - Path defaults/templates now prefer `/root/VibeResearch_toolkit` with legacy fallback support.
 - `bootstrap.sh` and `scripts/apply_local_state.sh` now allow `--help` without root.
 

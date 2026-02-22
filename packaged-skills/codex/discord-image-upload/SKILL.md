@@ -1,6 +1,7 @@
 ---
 name: discord-image-upload
 description: "Use when a Discord-connected Codex agent needs to attach local image files (PNG/JPEG/WebP/GIF) in Discord messages, via `codex-discord-relay` (`[[upload:...]]`) and optionally OpenClaw (`MEDIA: ...`)."
+version: 1.0
 ---
 
 # Discord Image Upload

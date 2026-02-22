@@ -94,6 +94,9 @@ check_skill_frontmatter() {
   if ! printf '%s\n' "$header" | grep -Eq '^[[:space:]]*description:[[:space:]]*[^[:space:]].*$'; then
     fail "missing YAML 'description' in: $skill_path"
   fi
+  if ! printf '%s\n' "$header" | grep -Eq '^[[:space:]]*version:[[:space:]]*[^[:space:]].*$'; then
+    fail "missing YAML 'version' in: $skill_path"
+  fi
 }
 
 run_check "node --check codex-discord-relay/relay.js" node --check codex-discord-relay/relay.js

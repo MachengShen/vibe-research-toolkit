@@ -1,6 +1,7 @@
 ---
 name: relay-long-task-callback
 description: Use when a task needs unattended background execution; must emit one valid [[relay-actions]] job_start block with watch.everySec/tailLines/thenTask/runTasks=true so follow-up analysis auto-runs.
+version: 1.0
 ---
 
 # Relay Long Task Callback

@@ -43,7 +43,7 @@ For any project with active experiments or ongoing work:
 | Purpose | Path |
 |---|---|
 | Skills (canonical) | `/root/.agents/skills/` |
-| Skills kit repo | `/root/VibeResearch_toolkit/` |
+| Skills kit repo | `/root/vibe-research-toolkit/` |
 | Relay config | `/root/.codex-discord-relay.env` |
 | Agent system overview | `/root/AGENT_SYSTEM_OVERVIEW.md` |
 | System working memory | `/root/SYSTEM_SETUP_WORKING_MEMORY.md` |

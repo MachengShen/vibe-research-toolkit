@@ -1,6 +1,6 @@
 # ML Research Design Guide
 
-This document explains why `VibeResearch_toolkit` is structured the way it is for advanced ML research workflows.
+This document explains why `vibe-research-toolkit` is structured the way it is for advanced ML research workflows.
 
 ## Problem framing
 

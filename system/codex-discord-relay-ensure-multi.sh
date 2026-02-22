@@ -38,7 +38,9 @@ pick_node_bin() {
     printf '%s' "$node_bin"
     return 0
   fi
-  node_bin="$(ls -1 /root/.nvm/versions/node/v*/bin/node 2>/dev/null | sort -V | tail -n 1 || true)"
+  node_bin="$(
+    compgen -G '/root/.nvm/versions/node/v*/bin/node' | sort -V | tail -n 1 || true
+  )"
   if [[ -n "$node_bin" && -x "$node_bin" ]]; then
     printf '%s' "$node_bin"
     return 0
@@ -51,7 +53,8 @@ if [[ -z "$NODE_BIN" || ! -x "$NODE_BIN" ]]; then
   echo "codex-discord-relay-ensure-multi: node binary not found (set NODE_BIN or install node via nvm)" >&2
   exit 1
 fi
-export PATH="$(dirname "$NODE_BIN"):$PATH"
+node_dir="$(dirname "$NODE_BIN")"
+export PATH="$node_dir:$PATH"
 
 # Load shared proxy env (GFW).
 if [[ -f "$PROXY_ENV_FILE" ]]; then

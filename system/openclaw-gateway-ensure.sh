@@ -11,7 +11,9 @@ DISCORD_GATEWAY_PROXY_DEFAULT="${DISCORD_GATEWAY_PROXY_DEFAULT:-http://127.0.0.1
 OPENCLAW_NODE_OPTIONS="${OPENCLAW_NODE_OPTIONS:-}"
 
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-NVM_BIN="$(ls -d1 /root/.nvm/versions/node/v*/bin 2>/dev/null | sort -V | tail -n 1 || true)"
+NVM_BIN="$(
+  compgen -G '/root/.nvm/versions/node/v*/bin' | sort -V | tail -n 1 || true
+)"
 if [ -n "$NVM_BIN" ] && [ -d "$NVM_BIN" ]; then
   PATH="$NVM_BIN:$PATH"
 fi
@@ -23,7 +25,9 @@ if [ -z "$OPENCLAW_BIN" ]; then
   OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
 fi
 if [ -z "$OPENCLAW_BIN" ]; then
-  OPENCLAW_BIN="$(ls -1 /root/.nvm/versions/node/v*/bin/openclaw 2>/dev/null | sort -V | tail -n 1 || true)"
+  OPENCLAW_BIN="$(
+    compgen -G '/root/.nvm/versions/node/v*/bin/openclaw' | sort -V | tail -n 1 || true
+  )"
 fi
 if [ -z "$OPENCLAW_BIN" ] || [ ! -x "$OPENCLAW_BIN" ]; then
   echo "openclaw-gateway-ensure: openclaw not found (set OPENCLAW_BIN or install openclaw)" >>"$START_LOG"

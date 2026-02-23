@@ -161,3 +161,57 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Next steps
 - Share the updated report file directly with GBDPro.
 - Optional: if desired, generate a one-page “canary runbook” companion file with restart/check/rollback commands.
+
+## 2026-02-23T13:33:43+08:00
+### Objective
+- Address reviewer concern that the robustness stream lacks an essential execution check gate.
+
+### Changes
+- Added a concrete implementation plan for execution assurance:
+  - `/root/VibeResearch_toolkit/docs/plans/2026-02-23-essential-execution-check-gate.md`
+- Plan scope includes:
+  - required PR execution gate (`scripts/essential_exec_check.sh` + CI enforcement)
+  - extended robustness suite (`scripts/robustness_exec_suite.sh` + testbed + nightly workflow)
+  - PR checklist/template integration and machine-readable summary validation.
+
+### Current state
+- Current CI remains lint-only until implementation is executed.
+- No runtime behavior changed in this planning step.
+
+### Next steps
+1. Review and approve plan.
+2. Implement Tasks 1-4 first (contract + essential gate + CI enforcement) as MVP.
+3. Add extended suite and reviewer UX tasks after MVP gate is stable.
+
+## 2026-02-23T13:48:08+08:00
+### Objective
+- Implement MVP execution assurance (Tasks 1-4): required execution gate + CI enforcement + extended robustness runbook/suite.
+
+### Changes
+- Added required PR execution gate script and outputs:
+  - `scripts/essential_exec_check.sh`
+  - `reports/essential_exec/<timestamp>/{suite_log.md,summary.json}`
+- Added extended robustness suite components:
+  - `scripts/robustness_exec_suite.sh`
+  - `tools/testbed/toy_train.py`
+  - `docs/runbooks/ROBUSTNESS_EXEC_SUITE.md`
+- Added explicit contract doc:
+  - `docs/verification/EXECUTION_CHECK_CONTRACT.md`
+- CI updates:
+  - `.github/workflows/ci.yml` now includes required `essential-exec` job + artifacts
+  - `.github/workflows/robustness-nightly.yml` added for nightly/manual suite runs
+- Documentation updated in `README.md`; reports ignored via `.gitignore`.
+
+### Latest commit
+- `54daa36` — ci: add essential execution gate and robustness suite
+- Significance: closes the primary design gap by making execution checks first-class and CI-enforced.
+
+### Verification evidence
+- `bash scripts/lint_repo.sh` (pass)
+- `bash scripts/essential_exec_check.sh` (pass)
+- `bash scripts/robustness_exec_suite.sh` (pass)
+
+### Next steps
+1. Add PR template/checklist integration so reviewers must attach execution evidence.
+2. Add machine-readable summary schema checker (`tools/verification/check_summary.py`) and enforce in CI.
+3. Run one Discord runtime canary session (wait-loop guard + visibility + restart recovery) and link logs.

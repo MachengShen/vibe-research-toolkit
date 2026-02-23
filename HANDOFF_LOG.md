@@ -977,3 +977,67 @@
 
 ### Training status
 - Inactive (epoch/metrics N/A)
+
+## 2026-02-23T13:33:43+08:00
+### Scope
+- Review GBDPro feedback highlighting missing essential execution checks and produce a concrete remediation plan.
+
+### Actions
+- Reviewed attachment:
+  - `/root/.codex-discord-relay/instances/claude/uploads/discord_1472061022239195304_thread_1472525033799942216/attachments/1771824690075_c421f14e_CODEX_PR_CHECKLIST_AND_ROBUSTNESS_EXEC_SUITE.md`
+- Assessed current state:
+  - CI currently runs lint-only in `.github/workflows/ci.yml`
+  - no dedicated essential execution gate script exists
+- Authored implementation plan:
+  - `/root/VibeResearch_toolkit/docs/plans/2026-02-23-essential-execution-check-gate.md`
+  - plan introduces required PR execution gate + extended robustness suite + canary/manual runtime checks.
+
+### Evidence paths
+- `/root/VibeResearch_toolkit/.github/workflows/ci.yml`
+- `/root/VibeResearch_toolkit/scripts/lint_repo.sh`
+- `/root/VibeResearch_toolkit/docs/plans/2026-02-23-essential-execution-check-gate.md`
+
+### Runtime note
+- No runtime code/config changes were applied in this step.
+
+### Training status
+- Inactive (epoch/metrics N/A)
+
+## 2026-02-23T13:48:08+08:00
+### Scope
+- User approved implementation of Tasks 1-4 from `docs/plans/2026-02-23-essential-execution-check-gate.md` to close the missing essential execution check concern.
+
+### Actions
+- Implemented required execution gate script:
+  - `/root/VibeResearch_toolkit/scripts/essential_exec_check.sh`
+- Implemented extended robustness suite runner + toy testbed:
+  - `/root/VibeResearch_toolkit/scripts/robustness_exec_suite.sh`
+  - `/root/VibeResearch_toolkit/tools/testbed/toy_train.py`
+- Added execution contract and runbook docs:
+  - `/root/VibeResearch_toolkit/docs/verification/EXECUTION_CHECK_CONTRACT.md`
+  - `/root/VibeResearch_toolkit/docs/runbooks/ROBUSTNESS_EXEC_SUITE.md`
+- Updated CI enforcement:
+  - `/root/VibeResearch_toolkit/.github/workflows/ci.yml`
+  - added required `essential-exec` job with artifact upload
+  - added relay dependency install (`npm ci --prefix codex-discord-relay`) for runtime smoke fidelity
+- Added nightly/manual robustness workflow:
+  - `/root/VibeResearch_toolkit/.github/workflows/robustness-nightly.yml`
+- Updated docs and repo hygiene:
+  - `/root/VibeResearch_toolkit/README.md`
+  - `/root/VibeResearch_toolkit/.gitignore` (ignore `reports/`)
+
+### Verification
+- `bash scripts/lint_repo.sh` (pass)
+- `bash scripts/essential_exec_check.sh` (pass)
+  - report: `reports/essential_exec/20260223-134709`
+- `bash scripts/robustness_exec_suite.sh` (pass)
+  - report: `reports/robustness_suite/2026-02-23`
+
+### Commit
+- `54daa36` — `ci: add essential execution gate and robustness suite`
+
+### Runtime note
+- No live relay restart was performed in this task.
+
+### Training status
+- Inactive (epoch/metrics N/A)

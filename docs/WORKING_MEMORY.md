@@ -117,3 +117,24 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
    - `RELAY_WAIT_PATTERN_GUARD_MODE=warn`
 2. Restart relay instance during a safe window to activate runtime changes.
 3. Observe 24h canary behavior and then consider broader enablement.
+
+## 2026-02-23T11:41:38+08:00
+### Objective
+- Finalize external-review handoff by pushing the robustness v2 implementation and producing a concise GBDPro-facing report.
+
+### Changes
+- Added reviewer brief at `/root/VibeResearch_toolkit/GBDPRO_REVIEW_BRIEF_2026-02-23.md`.
+- Pushed commit `de0e1b3` to `origin/p2-ml-automation`.
+
+### Latest commit
+- `de0e1b3` — feat: implement pipeline and ML robustness v2
+- Significance: introduces watch artifact gating + preflight + visibility guards in relay runtime and hardens ML run tooling/contracts for unattended runs.
+
+### Evidence
+- `/root/VibeResearch_toolkit/GBDPRO_REVIEW_BRIEF_2026-02-23.md`
+- `/root/VibeResearch_toolkit/HANDOFF_LOG.md`
+- `git push origin p2-ml-automation`
+
+### Next steps
+- Open a controlled restart window to activate updated live relay runtime if not yet restarted.
+- Canary-enable new runtime flags on one project/conversation before broad rollout.

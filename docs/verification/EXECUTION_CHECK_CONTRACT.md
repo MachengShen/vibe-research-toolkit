@@ -33,6 +33,11 @@ Artifacts:
 SLA:
 - target runtime <= 10 minutes in CI
 - any required check failure must fail PR CI
+- `summary.json` must pass schema validation:
+
+  ```bash
+  python3 tools/verification/check_summary.py --summary reports/essential_exec/<timestamp>/summary.json --suite-log reports/essential_exec/<timestamp>/suite_log.md
+  ```
 
 ### Tier 2: Extended Robustness Suite (nightly/manual)
 Command:
@@ -53,6 +58,11 @@ Scope:
 Artifacts:
 - `reports/robustness_suite/YYYY-MM-DD/suite_log.md`
 - `reports/robustness_suite/YYYY-MM-DD/summary.json`
+- summary schema validation command:
+
+  ```bash
+  python3 tools/verification/check_summary.py --summary reports/robustness_suite/YYYY-MM-DD/summary.json --suite-log reports/robustness_suite/YYYY-MM-DD/suite_log.md
+  ```
 
 ### Tier 3: Runtime Canary (Discord/manual)
 Used for behaviors that cannot be fully validated offline.
@@ -73,3 +83,27 @@ For runtime-impacting PRs, provide one of:
 - Tier 1 required check fails: PR is blocked.
 - Tier 2 failures: open follow-up issue + link logs, unless tier-2 is explicitly promoted to required for the branch.
 - Tier 3 manual failures: do not roll out to default runtime flags; keep canary-only until resolved.
+
+## Rollout Plan
+
+Phase 0 (stabilization):
+- run `bash scripts/essential_exec_check.sh` manually on active branches and tune flakes
+
+Phase 1 (mandatory gate):
+- require CI `essential-exec` for merge
+
+Phase 2 (trend monitoring):
+- run nightly/manual robustness suite and track failures over time
+
+Phase 3 (runtime canary):
+- execute Tier 3 Discord/manual checks for runtime-affecting relay changes before broad rollout
+
+## Definition Of Done
+
+- every PR runs and passes `scripts/essential_exec_check.sh` in CI
+- CI artifacts include `summary.json` and `suite_log.md` with valid schema
+- wrapper success/failure/cancel contracts are automatically validated
+- registry duplicate/concurrency safeguards are exercised by automation
+- reviewer checklist is available in PR template and verification docs
+- `scripts/robustness_exec_suite.sh` can be executed by a test agent via one documented command
+- execution regressions fail CI before merge

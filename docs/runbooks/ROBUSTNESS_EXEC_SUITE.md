@@ -13,6 +13,14 @@ Outputs:
 - `reports/robustness_suite/YYYY-MM-DD/suite_log.md`
 - `reports/robustness_suite/YYYY-MM-DD/summary.json`
 
+Validate summary schema:
+
+```bash
+python3 tools/verification/check_summary.py \
+  --summary reports/robustness_suite/YYYY-MM-DD/summary.json \
+  --suite-log reports/robustness_suite/YYYY-MM-DD/suite_log.md
+```
+
 ## What the Script Executes
 
 Required checks:
@@ -50,3 +58,5 @@ At end of `suite_log.md`, record:
 - Failed test IDs with exact evidence paths
 - Top 3 fixes with rationale
 - Report-vs-reality mismatches (if any)
+
+`scripts/robustness_exec_suite.sh` now auto-appends this section using execution results and evidence paths.

@@ -35,12 +35,14 @@ record_result() {
   local status="$3"
   local message="$4"
   local command="$5"
+  local evidence_path="${6:-$SUITE_LOG}"
 
-  local msg_s cmd_s
+  local msg_s cmd_s evidence_s
   msg_s="$(sanitize "$message")"
   cmd_s="$(sanitize "$command")"
+  evidence_s="$(sanitize "$evidence_path")"
 
-  printf '%s\t%s\t%s\t%s\t%s\n' "$test_id" "$required" "$status" "$msg_s" "$cmd_s" >>"$RESULTS_TSV"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$test_id" "$required" "$status" "$msg_s" "$cmd_s" "$evidence_s" >>"$RESULTS_TSV"
 
   if [[ "$required" == "true" && "$status" == "fail" ]]; then
     required_failures=$((required_failures + 1))
@@ -49,7 +51,7 @@ record_result() {
     warning_count=$((warning_count + 1))
   fi
 
-  append_log "- [${status}] ${test_id}: ${msg_s}"
+  append_log "- [${status}] ${test_id}: ${msg_s} (evidence: ${evidence_s})"
 }
 
 run_check() {
@@ -57,9 +59,12 @@ run_check() {
   local required="$2"
   local description="$3"
   local command="$4"
+  local started_at ended_at
 
+  started_at="$(iso_now)"
   append_log ""
   append_log "### ${test_id}: ${description}"
+  append_log "- started_at: ${started_at}"
   append_log ""
   append_log '```bash'
   append_log "$command"
@@ -74,8 +79,10 @@ run_check() {
   set -e
   end="$(date +%s)"
   duration=$((end - start))
+  ended_at="$(iso_now)"
 
   append_log '```'
+  append_log "- ended_at: ${ended_at}"
 
   if [[ "$rc" -eq 0 ]]; then
     record_result "$test_id" "$required" "pass" "ok (${duration}s)" "$command"
@@ -89,9 +96,12 @@ run_warn_or_fail() {
   local should_fail="$2"
   local description="$3"
   local command="$4"
+  local started_at ended_at
 
+  started_at="$(iso_now)"
   append_log ""
   append_log "### ${test_id}: ${description}"
+  append_log "- started_at: ${started_at}"
   append_log ""
   append_log '```bash'
   append_log "$command"
@@ -103,8 +113,10 @@ run_warn_or_fail() {
   bash -lc "$command" >>"$SUITE_LOG" 2>&1
   rc=$?
   set -e
+  ended_at="$(iso_now)"
 
   append_log '```'
+  append_log "- ended_at: ${ended_at}"
 
   if [[ "$rc" -eq 0 ]]; then
     record_result "$test_id" "false" "pass" "ok" "$command"
@@ -166,6 +178,7 @@ run_check "A1.lint" "true" "repository lint" "bash scripts/lint_repo.sh"
 if [[ -d "codex-discord-relay/node_modules" ]]; then
   run_check "A2.relay.help" "true" "relay parse smoke" "tmp=\"\$(mktemp)\"; set +e; timeout 8s node codex-discord-relay/relay.js --help >\"\$tmp\" 2>&1; rc=\$?; set -e; cat \"\$tmp\"; if grep -Eqi 'Cannot find module|SyntaxError|ReferenceError' \"\$tmp\"; then rm -f \"\$tmp\"; exit 1; fi; rm -f \"\$tmp\"; if [[ \"\$rc\" -ne 0 && \"\$rc\" -ne 1 && \"\$rc\" -ne 124 ]]; then exit \"\$rc\"; fi"
 else
+  run_check "A2.relay.syntax" "true" "relay syntax check (fallback without node_modules)" "node --check codex-discord-relay/relay.js"
   record_result "A2.relay.help" "false" "warn" "skipped: codex-discord-relay/node_modules not installed" "node codex-discord-relay/relay.js --help"
 fi
 run_check "A2.vr_run.help" "true" "vr_run help" "bash scripts/vr_run.sh --help"
@@ -247,6 +260,7 @@ if rows_path.exists():
             if len(row) < 5:
                 continue
             test_id, required, status, message, command = row[:5]
+            evidence_path = row[5] if len(row) >= 6 else str(rows_path.with_name("suite_log.md"))
             results.append(
                 {
                     "id": test_id,
@@ -254,6 +268,7 @@ if rows_path.exists():
                     "status": status,
                     "message": message,
                     "command": command,
+                    "evidence_path": evidence_path,
                 }
             )
 
@@ -267,6 +282,11 @@ doc = {
 }
 out_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+
+python3 tools/verification/check_summary.py \
+  --summary "$SUMMARY_JSON" \
+  --suite-log "$SUITE_LOG" \
+  --print-top-failures 8
 
 append_log ""
 append_log "## Final Summary"

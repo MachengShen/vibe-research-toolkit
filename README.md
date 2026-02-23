@@ -167,6 +167,13 @@ Run the required execution gate (PR-equivalent):
 bash scripts/essential_exec_check.sh
 ```
 
+Validate generated summary schema:
+
+```bash
+summary="$(ls -1dt reports/essential_exec/*/summary.json | head -n1)"
+python3 tools/verification/check_summary.py --summary "$summary" --suite-log "$(dirname "$summary")/suite_log.md"
+```
+
 Run the extended robustness suite:
 
 ```bash
@@ -175,6 +182,9 @@ bash scripts/robustness_exec_suite.sh
 
 CI (`.github/workflows/ci.yml`) runs lint + the required execution gate on every push and pull request.
 Nightly/manual robustness runs are defined in `.github/workflows/robustness-nightly.yml`.
+PR reviewer checklist references:
+- `.github/pull_request_template.md`
+- `docs/verification/PR_REVIEW_CHECKLIST.md`
 
 Lint enforces publishability invariants:
 - Bash headers and strict mode (`#!/usr/bin/env bash`, `set -euo pipefail`)

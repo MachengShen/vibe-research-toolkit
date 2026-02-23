@@ -37,12 +37,14 @@ record_result() {
   local status="$3"
   local message="$4"
   local command="$5"
+  local evidence_path="${6:-$SUITE_LOG}"
 
-  local msg_s cmd_s
+  local msg_s cmd_s evidence_s
   msg_s="$(sanitize "$message")"
   cmd_s="$(sanitize "$command")"
+  evidence_s="$(sanitize "$evidence_path")"
 
-  printf '%s\t%s\t%s\t%s\t%s\n' "$test_id" "$required" "$status" "$msg_s" "$cmd_s" >>"$RESULTS_TSV"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$test_id" "$required" "$status" "$msg_s" "$cmd_s" "$evidence_s" >>"$RESULTS_TSV"
 
   if [[ "$required" == "true" && "$status" == "fail" ]]; then
     required_failures=$((required_failures + 1))
@@ -51,7 +53,7 @@ record_result() {
     warning_count=$((warning_count + 1))
   fi
 
-  append_log "- [${status}] ${test_id}: ${msg_s}"
+  append_log "- [${status}] ${test_id}: ${msg_s} (evidence: ${evidence_s})"
 }
 
 run_check() {
@@ -59,9 +61,12 @@ run_check() {
   local required="$2"
   local description="$3"
   local command="$4"
+  local started_at ended_at
 
+  started_at="$(iso_now)"
   append_log ""
   append_log "## ${test_id}: ${description}"
+  append_log "- started_at: ${started_at}"
   append_log ""
   append_log '```bash'
   append_log "$command"
@@ -76,8 +81,10 @@ run_check() {
   set -e
   end="$(date +%s)"
   duration=$((end - start))
+  ended_at="$(iso_now)"
 
   append_log '```'
+  append_log "- ended_at: ${ended_at}"
 
   if [[ "$rc" -eq 0 ]]; then
     record_result "$test_id" "$required" "pass" "ok (${duration}s)" "$command"
@@ -90,8 +97,12 @@ mark_manual() {
   local test_id="$1"
   local description="$2"
   local command="$3"
+  local at
+  at="$(iso_now)"
   append_log ""
   append_log "## ${test_id}: ${description}"
+  append_log "- started_at: ${at}"
+  append_log "- ended_at: ${at}"
   append_log ""
   append_log "manual-required in Discord runtime; not executed in local suite"
   record_result "$test_id" "false" "warn" "manual-required" "$command"
@@ -110,6 +121,7 @@ append_log ""
 append_log "- node: $(node -v 2>/dev/null || echo 'missing')"
 append_log "- python: $(python3 --version 2>/dev/null || echo 'missing')"
 append_log "- head: $(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
+append_log "- git_status_porcelain: $(git status --porcelain | tr '\n' ' ' || true)"
 append_log ""
 append_log "## Results"
 
@@ -204,6 +216,7 @@ if rows_path.exists():
             if len(row) < 5:
                 continue
             test_id, required, status, message, command = row[:5]
+            evidence_path = row[5] if len(row) >= 6 else str(rows_path.with_name("suite_log.md"))
             results.append(
                 {
                     "id": test_id,
@@ -211,6 +224,7 @@ if rows_path.exists():
                     "status": status,
                     "message": message,
                     "command": command,
+                    "evidence_path": evidence_path,
                 }
             )
 
@@ -225,6 +239,11 @@ doc = {
 out_path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 
+python3 tools/verification/check_summary.py \
+  --summary "$SUMMARY_JSON" \
+  --suite-log "$SUITE_LOG" \
+  --print-top-failures 8
+
 append_log ""
 append_log "## Final Summary"
 append_log ""
@@ -232,6 +251,75 @@ append_log "- overall: ${overall}"
 append_log "- required_failed: ${required_failures}"
 append_log "- warnings: ${warning_count}"
 append_log "- summary_json: ${SUMMARY_JSON}"
+
+python3 - "$SUMMARY_JSON" "$SUITE_LOG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+suite_log = Path(sys.argv[2])
+results = summary.get("results", [])
+failed = [r for r in results if r.get("status") == "fail"]
+warned = [r for r in results if r.get("status") == "warn"]
+
+def fix_for_test(test_id: str) -> str:
+    if test_id.startswith("T0"):
+        return "Fix lint/shebang failures before rerunning the suite."
+    if test_id.startswith(("T1", "T2", "T3", "T4")):
+        return "Repair wrapper contract behavior in scripts/vr_run.sh and metrics generation paths."
+    if test_id.startswith("T5"):
+        return "Validate artifact gate configuration (requireFiles/readyTimeoutSec/onMissing) in live relay runs."
+    if test_id.startswith("T6"):
+        return "Investigate append_registry lock/atomic write behavior for concurrent writes."
+    if test_id.startswith("T7"):
+        return "Tune wait-loop guard mode/pattern rules and verify warn/reject behavior in Discord job_start."
+    if test_id.startswith("T8"):
+        return "Tune visibility heartbeat/degradation settings and verify startup heartbeat coverage."
+    if test_id.startswith("T9"):
+        return "Run restart-recovery canary and patch watcher reattach/callback recovery gaps."
+    return "Investigate failure and patch test-specific execution path."
+
+recommended = []
+for item in failed + warned:
+    candidate = fix_for_test(str(item.get("id", "")))
+    if candidate not in recommended:
+        recommended.append(candidate)
+    if len(recommended) == 3:
+        break
+while len(recommended) < 3:
+    recommended.append("No additional automated failures; keep canary manual checks in the release checklist.")
+
+with suite_log.open("a", encoding="utf-8") as f:
+    f.write("\n## D. Final Summary Requirements\n\n")
+    f.write(f"- Overall PASS/FAIL: {summary.get('overall', 'unknown').upper()}\n")
+    if failed:
+        f.write("- Failed tests:\n")
+        for item in failed:
+            f.write(
+                "  - {id}: {msg} (evidence: {evidence})\n".format(
+                    id=item.get("id", "unknown"),
+                    msg=item.get("message", ""),
+                    evidence=item.get("evidence_path", "n/a"),
+                )
+            )
+    else:
+        f.write("- Failed tests: none\n")
+    f.write("- Recommended fixes (top 3):\n")
+    for idx, rec in enumerate(recommended, 1):
+        f.write(f"  - {idx}. {rec}\n")
+
+    unresolved_manual = [r for r in warned if str(r.get("id", "")).startswith(("T7", "T8", "T9"))]
+    if unresolved_manual:
+        ids = ", ".join(str(r.get("id", "")) for r in unresolved_manual)
+        f.write(
+            "- Report-vs-reality discrepancies: offline suite passed but manual runtime checks remain unexecuted ({ids}).\n".format(
+                ids=ids
+            )
+        )
+    else:
+        f.write("- Report-vs-reality discrepancies: none detected in this run.\n")
+PY
 
 if [[ "$overall" != "pass" ]]; then
   printf '[robustness_suite][fail] required checks failed: %s\n' "$required_failures" >&2

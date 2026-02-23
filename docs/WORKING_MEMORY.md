@@ -138,3 +138,26 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Next steps
 - Open a controlled restart window to activate updated live relay runtime if not yet restarted.
 - Canary-enable new runtime flags on one project/conversation before broad rollout.
+
+## 2026-02-23T11:44:44+08:00
+### Objective
+- Produce a self-contained PR-style GBDPro review summary file with direct branch+commit references and canary rollout checklist.
+
+### Changes
+- Reworked `/root/VibeResearch_toolkit/GBDPRO_REVIEW_BRIEF_2026-02-23.md` into a PR-style summary including:
+  - risk checklist
+  - canary flag configuration table
+  - reviewer focus questions
+  - branch/commit inventory for direct handoff.
+
+### Latest commit
+- `7e881f0` — docs: expand GBDPro brief with PR-style risk and canary checklist
+- Significance: report is now standalone for reviewer handoff without requiring separate repository links.
+
+### Evidence
+- `/root/VibeResearch_toolkit/GBDPRO_REVIEW_BRIEF_2026-02-23.md`
+- `git log --oneline -n 3`
+
+### Next steps
+- Share the updated report file directly with GBDPro.
+- Optional: if desired, generate a one-page “canary runbook” companion file with restart/check/rollback commands.

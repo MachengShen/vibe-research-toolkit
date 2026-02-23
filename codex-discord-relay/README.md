@@ -141,7 +141,11 @@ Marker syntax (agent output):
    "watch":{"everySec":300,"tailLines":20,
             "thenTask":"Analyze results and write a short report in HANDOFF_LOG.md",
             "thenTaskDescription":"Analyze final metrics + failures for seed 1/3",
-            "runTasks":true}
+            "runTasks":true,
+            "requireFiles":["exp/results/r0007/metrics.json","exp/results/r0007/meta.json","exp/results/r0007/train.log"],
+            "readyTimeoutSec":900,
+            "readyPollSec":15,
+            "onMissing":"block"}
   }
 ]}
 [[/relay-actions]]
@@ -155,6 +159,15 @@ Notes:
 - Default watcher output is compact (summary + output delta) and suppresses no-change spam.
 - `job_start.description` and `watch.thenTaskDescription` are optional but recommended so progress updates stay readable.
 - Job-finish finalization (`exit_code` detection + `thenTask` enqueue) runs outside the normal conversation queue so callbacks still fire even if a foreground agent run is stuck.
+- Optional watch-contract v2 fields:
+  - `watch.requireFiles`: callback waits until all listed files exist (when feature flag is enabled).
+  - `watch.readyTimeoutSec` / `watch.readyPollSec`: artifact wait timeout and poll interval.
+  - `watch.onMissing`: `block` (default) or `enqueue`.
+- Optional launch preflight block on `job_start`:
+  - `preflight.checks[]` with `path_exists`, `cmd_exit_zero`, `min_free_disk_gb`.
+  - `preflight.onFail`: `reject` (default) or `warn`.
+- Wait-pattern guard can warn/reject risky `pgrep -f` self-match loops before launch.
+- Visibility gate can mark long jobs as degraded if startup/periodic heartbeats are missing.
 
 Controls:
 
@@ -175,6 +188,14 @@ Env knobs:
 - `RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_FINISH=true|false` (default `false`)
 - `RELAY_JOBS_WATCH_COMPACT_TAIL_LINES=<int>` (default `3`)
 - `RELAY_JOBS_WATCH_COMPACT_TAIL_MAX_CHARS=<int>` (default `600`)
+- `RELAY_WATCH_REQUIRE_FILES_ENABLED=true|false` (default `false`)
+- `RELAY_WATCH_REQUIRE_FILES_DEFAULT_TIMEOUT_SEC=<int>` (default `900`)
+- `RELAY_WATCH_REQUIRE_FILES_DEFAULT_POLL_SEC=<int>` (default `15`)
+- `RELAY_JOB_PREFLIGHT_ENABLED=true|false` (default `false`)
+- `RELAY_WAIT_PATTERN_GUARD_MODE=off|warn|reject` (default `warn`)
+- `RELAY_VISIBILITY_GATE_ENABLED=true|false` (default `false`)
+- `RELAY_VISIBILITY_STARTUP_HEARTBEAT_SEC=<int>` (default `60`)
+- `RELAY_VISIBILITY_HEARTBEAT_EVERY_SEC=<int>` (default `600`)
 - `RELAY_GO_AUTOWRAP_LONG_TASKS=true|false` (default `true`)
 - `RELAY_GO_LONG_TASK_WATCH_EVERY_SEC=<int>` (default `120`)
 - `RELAY_GO_LONG_TASK_TAIL_LINES=<int>` (default `80`)
@@ -245,6 +266,31 @@ Env knobs:
 - `RELAY_RESEARCH_POST_ON_BLOCKED=true|false` (default `true`)
 - `RELAY_RESEARCH_POST_EVERY_STEPS=<int>` (default `5`)
 - `RELAY_RESEARCH_REQUIRE_NOTE_PREFIX=true|false` (default `false`)
+- `RELAY_REGISTRY_LOCK_ENABLED=true|false` (default `true`; used by `tools/exp/append_registry.py`)
+
+### ML Utility Scripts
+
+The toolkit includes experiment-contract helpers used by long-run callbacks:
+
+- `scripts/vr_run.sh`:
+  - wraps train/eval commands
+  - writes `meta.json`, `train.log`, and schema-valid `metrics.json` even on cancel/failure
+- `tools/exp/render_template.py`:
+  - render `templates/experiments/*.yaml` by id into command/watch/artifact JSON
+- `tools/exp/append_registry.py`:
+  - append run entries to `exp/registry.jsonl` with optional duplicate handling and file locking
+- `tools/exp/summarize_run.py`:
+  - generate markdown summaries from a run directory (`--registry` optional)
+- `tools/exp/best_run.py`:
+  - select best successful run from `exp/registry.jsonl` for a metric
+
+Examples:
+
+```bash
+python3 tools/exp/render_template.py --template-id train_baseline --set seed=1 --set config=cfg.yaml
+python3 tools/exp/summarize_run.py --run-dir exp/results/<run_id> --registry exp/registry.jsonl
+python3 tools/exp/best_run.py --registry exp/registry.jsonl --metric val_loss --higher-is-better false
+```
 
 ## Task Queue (Ralph Loop)
 

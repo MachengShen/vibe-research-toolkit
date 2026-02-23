@@ -100,6 +100,12 @@ function intEnv(name, fallback) {
   return Math.floor(n);
 }
 
+function parseWaitPatternGuardMode(raw) {
+  const mode = String(raw || "warn").trim().toLowerCase();
+  if (mode === "off" || mode === "warn" || mode === "reject") return mode;
+  return "warn";
+}
+
 function parseContextSpecEntry(rawEntry) {
   const raw = String(rawEntry || "").trim();
   if (!raw) return null;
@@ -309,6 +315,14 @@ const CONFIG = {
   jobsWatchIncludeTailOnFinish: boolEnv("RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_FINISH", false),
   jobsWatchCompactTailLines: Math.max(1, intEnv("RELAY_JOBS_WATCH_COMPACT_TAIL_LINES", 3)),
   jobsWatchCompactTailMaxChars: Math.max(80, intEnv("RELAY_JOBS_WATCH_COMPACT_TAIL_MAX_CHARS", 600)),
+  watchRequireFilesEnabled: boolEnv("RELAY_WATCH_REQUIRE_FILES_ENABLED", false),
+  watchRequireFilesDefaultTimeoutSec: Math.max(10, intEnv("RELAY_WATCH_REQUIRE_FILES_DEFAULT_TIMEOUT_SEC", 900)),
+  watchRequireFilesDefaultPollSec: Math.max(1, intEnv("RELAY_WATCH_REQUIRE_FILES_DEFAULT_POLL_SEC", 15)),
+  jobPreflightEnabled: boolEnv("RELAY_JOB_PREFLIGHT_ENABLED", false),
+  waitPatternGuardMode: parseWaitPatternGuardMode(process.env.RELAY_WAIT_PATTERN_GUARD_MODE || "warn"),
+  visibilityGateEnabled: boolEnv("RELAY_VISIBILITY_GATE_ENABLED", false),
+  visibilityStartupHeartbeatSec: Math.max(10, intEnv("RELAY_VISIBILITY_STARTUP_HEARTBEAT_SEC", 60)),
+  visibilityHeartbeatEverySec: Math.max(30, intEnv("RELAY_VISIBILITY_HEARTBEAT_EVERY_SEC", 600)),
 
   worktreeRootDir: RELAY_WORKTREE_ROOT_DIR,
   worktreeRootDirError: RELAY_WORKTREE_ROOT_DIR_ERROR,
@@ -552,7 +566,19 @@ function normalizeRelayActionWatch(rawWatch) {
   if (!rawWatch || typeof rawWatch !== "object" || Array.isArray(rawWatch)) {
     return { ok: true, watch: null };
   }
-  const allowedKeys = new Set(["everySec", "tailLines", "thenTask", "thenTaskDescription", "runTasks"]);
+  const allowedKeys = new Set([
+    "everySec",
+    "tailLines",
+    "thenTask",
+    "thenTaskDescription",
+    "runTasks",
+    "requireFiles",
+    "readyTimeoutSec",
+    "readyPollSec",
+    "onMissing",
+    "long",
+    "firstPostRegex",
+  ]);
   for (const k of Object.keys(rawWatch)) {
     if (!allowedKeys.has(k)) {
       return { ok: false, error: `unknown watch field: ${k}`, watch: null };
@@ -564,9 +590,35 @@ function normalizeRelayActionWatch(rawWatch) {
   const thenTaskRaw = rawWatch.thenTask;
   const thenTaskDescriptionRaw = rawWatch.thenTaskDescription;
   const runTasksRaw = rawWatch.runTasks;
+  const requireFilesRaw = rawWatch.requireFiles;
+  const readyTimeoutSecRaw = rawWatch.readyTimeoutSec;
+  const readyPollSecRaw = rawWatch.readyPollSec;
+  const onMissingRaw = rawWatch.onMissing;
+  const longRaw = rawWatch.long;
+  const firstPostRegexRaw = rawWatch.firstPostRegex;
 
   const everySec = everySecRaw == null ? null : Number(everySecRaw);
   const tailLines = tailLinesRaw == null ? null : Number(tailLinesRaw);
+  const readyTimeoutSec = readyTimeoutSecRaw == null ? null : Number(readyTimeoutSecRaw);
+  const readyPollSec = readyPollSecRaw == null ? null : Number(readyPollSecRaw);
+  const onMissing = onMissingRaw == null ? null : String(onMissingRaw || "").trim().toLowerCase();
+
+  const requireFilesList = Array.isArray(requireFilesRaw)
+    ? requireFilesRaw
+    : requireFilesRaw == null
+    ? []
+    : [requireFilesRaw];
+  const normalizedRequireFiles = [];
+  for (const item of requireFilesList) {
+    const p = String(item || "").trim();
+    if (!p) continue;
+    normalizedRequireFiles.push(p.length > 600 ? p.slice(0, 600) : p);
+    if (normalizedRequireFiles.length >= 32) break;
+  }
+  const onMissingNorm = onMissing === "enqueue" ? "enqueue" : onMissing === "block" ? "block" : null;
+  if (onMissing != null && onMissingNorm == null) {
+    return { ok: false, error: `invalid onMissing value: ${onMissing}`, watch: null };
+  }
 
   const normalized = {
     everySec:
@@ -589,6 +641,25 @@ function normalizeRelayActionWatch(rawWatch) {
             return s || null;
           })(),
     runTasks: Boolean(runTasksRaw),
+    requireFiles: normalizedRequireFiles,
+    readyTimeoutSec:
+      readyTimeoutSec == null || !Number.isFinite(readyTimeoutSec)
+        ? null
+        : Math.max(10, Math.min(86400, Math.floor(readyTimeoutSec))),
+    readyPollSec:
+      readyPollSec == null || !Number.isFinite(readyPollSec)
+        ? null
+        : Math.max(1, Math.min(3600, Math.floor(readyPollSec))),
+    onMissing: onMissingNorm,
+    long: longRaw == null ? null : Boolean(longRaw),
+    firstPostRegex:
+      firstPostRegexRaw == null
+        ? null
+        : (() => {
+            const s = String(firstPostRegexRaw || "").trim();
+            if (!s) return null;
+            return s.length > 300 ? s.slice(0, 300) : s;
+          })(),
   };
 
   // If all fields are empty, treat as no watch config.
@@ -597,8 +668,87 @@ function normalizeRelayActionWatch(rawWatch) {
     normalized.tailLines != null ||
     normalized.thenTask != null ||
     normalized.thenTaskDescription != null ||
-    normalized.runTasks;
+    normalized.runTasks ||
+    normalized.requireFiles.length > 0 ||
+    normalized.readyTimeoutSec != null ||
+    normalized.readyPollSec != null ||
+    normalized.onMissing != null ||
+    normalized.long != null ||
+    normalized.firstPostRegex != null;
   return { ok: true, watch: hasAny ? normalized : null };
+}
+
+function normalizeRelayActionPreflight(rawPreflight) {
+  if (rawPreflight == null) return { ok: true, preflight: null };
+  if (!rawPreflight || typeof rawPreflight !== "object" || Array.isArray(rawPreflight)) {
+    return { ok: false, error: "preflight must be an object", preflight: null };
+  }
+  const allowedKeys = new Set(["checks", "onFail"]);
+  for (const k of Object.keys(rawPreflight)) {
+    if (!allowedKeys.has(k)) {
+      return { ok: false, error: `unknown preflight field: ${k}`, preflight: null };
+    }
+  }
+
+  const checks = [];
+  const checksRaw = Array.isArray(rawPreflight.checks) ? rawPreflight.checks : [];
+  for (let i = 0; i < checksRaw.length; i += 1) {
+    const raw = checksRaw[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { ok: false, error: `preflight.checks[${i}] must be an object`, preflight: null };
+    }
+    const type = String(raw.type || "").trim().toLowerCase();
+    if (!type) return { ok: false, error: `preflight.checks[${i}] missing type`, preflight: null };
+    if (type === "path_exists") {
+      const keys = new Set(["type", "path"]);
+      for (const k of Object.keys(raw)) {
+        if (!keys.has(k)) return { ok: false, error: `preflight.checks[${i}] unknown field: ${k}`, preflight: null };
+      }
+      const p = String(raw.path || "").trim();
+      if (!p) return { ok: false, error: `preflight.checks[${i}] path_exists missing path`, preflight: null };
+      checks.push({ type: "path_exists", path: p.length > 800 ? p.slice(0, 800) : p });
+      continue;
+    }
+    if (type === "cmd_exit_zero") {
+      const keys = new Set(["type", "cmd", "timeoutSec"]);
+      for (const k of Object.keys(raw)) {
+        if (!keys.has(k)) return { ok: false, error: `preflight.checks[${i}] unknown field: ${k}`, preflight: null };
+      }
+      const cmd = String(raw.cmd || "").trim();
+      if (!cmd) return { ok: false, error: `preflight.checks[${i}] cmd_exit_zero missing cmd`, preflight: null };
+      const timeoutRaw = raw.timeoutSec == null ? null : Number(raw.timeoutSec);
+      checks.push({
+        type: "cmd_exit_zero",
+        cmd: cmd.length > 4000 ? cmd.slice(0, 4000) : cmd,
+        timeoutSec:
+          timeoutRaw == null || !Number.isFinite(timeoutRaw) ? null : Math.max(1, Math.min(600, Math.floor(timeoutRaw))),
+      });
+      continue;
+    }
+    if (type === "min_free_disk_gb") {
+      const keys = new Set(["type", "path", "gb"]);
+      for (const k of Object.keys(raw)) {
+        if (!keys.has(k)) return { ok: false, error: `preflight.checks[${i}] unknown field: ${k}`, preflight: null };
+      }
+      const gbRaw = Number(raw.gb);
+      if (!Number.isFinite(gbRaw) || gbRaw <= 0) {
+        return { ok: false, error: `preflight.checks[${i}] min_free_disk_gb invalid gb`, preflight: null };
+      }
+      const p = raw.path == null ? "." : String(raw.path || "").trim() || ".";
+      checks.push({
+        type: "min_free_disk_gb",
+        path: p.length > 800 ? p.slice(0, 800) : p,
+        gb: Math.min(1024, Number(gbRaw)),
+      });
+      continue;
+    }
+    return { ok: false, error: `preflight.checks[${i}] unsupported type: ${type}`, preflight: null };
+  }
+
+  const onFailRaw = String(rawPreflight.onFail || "").trim().toLowerCase();
+  const onFail = onFailRaw === "warn" ? "warn" : "reject";
+  if (checks.length === 0) return { ok: true, preflight: null };
+  return { ok: true, preflight: { checks, onFail } };
 }
 
 function normalizeRelayAction(rawAction) {
@@ -619,7 +769,7 @@ function normalizeRelayAction(rawAction) {
   if (type === "job_start") {
     // Also accept thenTask/thenTaskDescription at top level for agent compatibility
     // (agents naturally write them there; auto-migrate into watch).
-    const err = assertAllowedKeys(["type", "command", "description", "watch", "thenTask", "thenTaskDescription"]);
+    const err = assertAllowedKeys(["type", "command", "description", "watch", "thenTask", "thenTaskDescription", "preflight"]);
     if (err) return { ok: false, error: err, action: null };
     const command = String(rawAction.command || "").trim();
     if (!command) return { ok: false, error: "job_start: missing command", action: null };
@@ -635,7 +785,13 @@ function normalizeRelayAction(rawAction) {
     }
     const watchRes = normalizeRelayActionWatch(mergedWatch);
     if (!watchRes.ok) return { ok: false, error: `job_start: ${watchRes.error}`, action: null };
-    return { ok: true, error: "", action: { type, command, description, watch: watchRes.watch } };
+    const preflightRes = normalizeRelayActionPreflight(rawAction.preflight);
+    if (!preflightRes.ok) return { ok: false, error: `job_start: ${preflightRes.error}`, action: null };
+    return {
+      ok: true,
+      error: "",
+      action: { type, command, description, watch: watchRes.watch, preflight: preflightRes.preflight },
+    };
   }
 
   if (type === "job_watch") {
@@ -1274,6 +1430,18 @@ function ensurePlansShape(session) {
 
 function normalizeJobWatchObject(watch) {
   if (!watch || typeof watch !== "object" || Array.isArray(watch)) return null;
+  const rawRequireFiles = Array.isArray(watch.requireFiles) ? watch.requireFiles : [];
+  const requireFiles = [];
+  for (const item of rawRequireFiles) {
+    const p = String(item || "").trim();
+    if (!p) continue;
+    requireFiles.push(p.length > 600 ? p.slice(0, 600) : p);
+    if (requireFiles.length >= 32) break;
+  }
+  const onMissingRaw = String(watch.onMissing || "").trim().toLowerCase();
+  const onMissing = onMissingRaw === "enqueue" ? "enqueue" : "block";
+  const readyTimeoutSec = Number(watch.readyTimeoutSec);
+  const readyPollSec = Number(watch.readyPollSec);
   const out = {
     enabled: Boolean(watch.enabled),
     everySec: Math.max(1, Math.min(86400, Math.floor(Number(watch.everySec || 300) || 300))),
@@ -1281,15 +1449,22 @@ function normalizeJobWatchObject(watch) {
     thenTask: watch.thenTask == null ? null : String(watch.thenTask || "").trim() || null,
     thenTaskDescription: watch.thenTaskDescription == null ? null : taskTextPreview(watch.thenTaskDescription, 200) || null,
     runTasks: Boolean(watch.runTasks),
+    requireFiles,
+    readyTimeoutSec: Number.isFinite(readyTimeoutSec) ? Math.max(10, Math.min(86400, Math.floor(readyTimeoutSec))) : null,
+    readyPollSec: Number.isFinite(readyPollSec) ? Math.max(1, Math.min(3600, Math.floor(readyPollSec))) : null,
+    onMissing,
+    long: watch.long == null ? null : Boolean(watch.long),
+    firstPostRegex: watch.firstPostRegex == null ? null : String(watch.firstPostRegex || "").trim() || null,
   };
   if (out.thenTask && out.thenTask.length > 2000) out.thenTask = out.thenTask.slice(0, 2000);
+  if (out.firstPostRegex && out.firstPostRegex.length > 300) out.firstPostRegex = out.firstPostRegex.slice(0, 300);
   return out;
 }
 
 function normalizeJobObject(job, fallbackId) {
   if (!job || typeof job !== "object") return false;
   let changed = false;
-  const validStatuses = new Set(["running", "done", "failed", "canceled"]);
+  const validStatuses = new Set(["running", "done", "failed", "canceled", "blocked"]);
 
   if (typeof job.id !== "string" || !job.id.trim()) {
     job.id = String(fallbackId || `j-${Date.now()}`);
@@ -1329,6 +1504,26 @@ function normalizeJobObject(job, fallbackId) {
     job.finishedAt = null;
     changed = true;
   }
+  if (job.exitedAt != null && typeof job.exitedAt !== "string") {
+    job.exitedAt = null;
+    changed = true;
+  }
+  if (job.visibilityStatus != null && typeof job.visibilityStatus !== "string") {
+    job.visibilityStatus = String(job.visibilityStatus || "");
+    changed = true;
+  }
+  if (!job.visibilityStatus) {
+    job.visibilityStatus = "ok";
+    changed = true;
+  }
+  if (job.visibilityLastHeartbeatAt != null && typeof job.visibilityLastHeartbeatAt !== "string") {
+    job.visibilityLastHeartbeatAt = String(job.visibilityLastHeartbeatAt || "");
+    changed = true;
+  }
+  if (job.visibilityDegradedAt != null && typeof job.visibilityDegradedAt !== "string") {
+    job.visibilityDegradedAt = String(job.visibilityDegradedAt || "");
+    changed = true;
+  }
   if (job.pid != null && (typeof job.pid !== "number" || !Number.isFinite(job.pid) || job.pid <= 0)) {
     job.pid = null;
     changed = true;
@@ -1354,6 +1549,53 @@ function normalizeJobObject(job, fallbackId) {
     }
   } else if (job.watch != null) {
     job.watch = null;
+    changed = true;
+  }
+
+  const lifecycleStateRaw = String(job.lifecycleState || "").trim().toLowerCase();
+  if (!lifecycleStateRaw) {
+    job.lifecycleState = job.status === "done" ? "completed" : job.status === "canceled" ? "failed" : job.status;
+    changed = true;
+  } else if (job.lifecycleState !== lifecycleStateRaw) {
+    job.lifecycleState = lifecycleStateRaw;
+    changed = true;
+  }
+  if (job.lifecycleReason != null && typeof job.lifecycleReason !== "string") {
+    job.lifecycleReason = String(job.lifecycleReason || "");
+    changed = true;
+  }
+  if (job.lifecycleUpdatedAt != null && typeof job.lifecycleUpdatedAt !== "string") {
+    job.lifecycleUpdatedAt = String(job.lifecycleUpdatedAt || "");
+    changed = true;
+  }
+  if (!Array.isArray(job.lifecycle)) {
+    job.lifecycle = [];
+    changed = true;
+  } else {
+    const cleaned = [];
+    for (const row of job.lifecycle) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const state = String(row.state || "").trim().toLowerCase();
+      const at = String(row.at || "").trim();
+      if (!state || !at) continue;
+      const reason = row.reason == null ? "" : String(row.reason || "");
+      const details = row.details && typeof row.details === "object" && !Array.isArray(row.details) ? row.details : null;
+      cleaned.push(details ? { state, at, reason, details } : { state, at, reason });
+    }
+    if (cleaned.length !== job.lifecycle.length) changed = true;
+    job.lifecycle = cleaned.slice(-200);
+  }
+  if (job.lifecycle.length === 0 && job.lifecycleState) {
+    job.lifecycle.push({
+      state: job.lifecycleState,
+      at: job.startedAt || nowIso(),
+      reason: job.lifecycleReason || "normalize_bootstrap",
+    });
+    changed = true;
+  }
+  if (!job.lifecycleUpdatedAt && job.lifecycle.length > 0) {
+    const last = job.lifecycle[job.lifecycle.length - 1];
+    job.lifecycleUpdatedAt = String(last.at || nowIso());
     changed = true;
   }
   return changed;
@@ -3708,6 +3950,23 @@ async function executeResearchActions({
 
       const rawCommand = String(action.command || "").trim();
       if (!rawCommand) return { ok: false, executed, lines, error: "job_start missing command" };
+      const guardRes = await evaluateJobLaunchGuards({
+        command: rawCommand,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
+        preflight: action.preflight || null,
+      });
+      if (guardRes.warnings && guardRes.warnings.length > 0) {
+        lines.push(`- job_start guard warnings: ${guardRes.warnings.join(" | ")}`);
+      }
+      if (!guardRes.ok) {
+        const failed = guardRes.preflight && guardRes.preflight.failed ? JSON.stringify(guardRes.preflight.failed) : "";
+        return {
+          ok: false,
+          executed,
+          lines,
+          error: `job_start blocked by guard (${guardRes.reason})${failed ? `: ${failed}` : ""}`,
+        };
+      }
       const wrappedCommand = [
         `mkdir -p ${safeShellArg(runDir)}`,
         `export RUN_ID=${safeShellArg(runId)}`,
@@ -3740,6 +3999,8 @@ async function executeResearchActions({
       const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
         everySecDefault: CONFIG.jobsAutoWatchEverySec,
         tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+        jobCommand: rawCommand,
+        workdir: session.workdir || CONFIG.defaultWorkdir,
       });
       const watchRes = await startJobWatcher({
         conversationKey,
@@ -3778,6 +4039,8 @@ async function executeResearchActions({
       const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
         everySecDefault: CONFIG.jobsAutoWatchEverySec,
         tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+        jobCommand: job.command || "",
+        workdir: job.workdir || session.workdir || CONFIG.defaultWorkdir,
       });
       const res = await startJobWatcher({
         conversationKey,
@@ -3799,7 +4062,9 @@ async function executeResearchActions({
       const pid = job.pid;
       killProcessGroup(pid, "SIGTERM");
       job.status = "canceled";
+      job.exitedAt = job.exitedAt || nowIso();
       job.finishedAt = job.finishedAt || nowIso();
+      appendJobLifecycleTransition(job, "failed", "job_stop_requested", { signal: "SIGTERM", pid: pid || null });
       session.updatedAt = nowIso();
       await queueSaveState();
       await stopJobWatcher(conversationKey, job.id);
@@ -4714,6 +4979,322 @@ function compactTailSnippet(tail, maxLines = 3, maxChars = 600) {
   return out;
 }
 
+function sleepMs(ms) {
+  const n = Number(ms);
+  const waitMs = Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+  return new Promise((resolve) => setTimeout(resolve, waitMs));
+}
+
+function sanitizeLifecycleDetails(details) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return null;
+  try {
+    const txt = JSON.stringify(details);
+    if (!txt) return null;
+    if (txt.length <= 4000) return JSON.parse(txt);
+    return { note: "details_truncated", preview: txt.slice(0, 1000) };
+  } catch {
+    return { note: "details_unserializable" };
+  }
+}
+
+function appendJobLifecycleTransition(job, state, reason, details = null) {
+  if (!job || typeof job !== "object") return false;
+  const nextState = String(state || "").trim().toLowerCase();
+  if (!nextState) return false;
+  const nextReason = String(reason || "").trim();
+  const at = nowIso();
+  const safeDetails = sanitizeLifecycleDetails(details);
+  if (!Array.isArray(job.lifecycle)) job.lifecycle = [];
+  const prev = job.lifecycle.length > 0 ? job.lifecycle[job.lifecycle.length - 1] : null;
+  const sameAsPrev =
+    prev &&
+    prev.state === nextState &&
+    String(prev.reason || "") === nextReason &&
+    JSON.stringify(prev.details || null) === JSON.stringify(safeDetails || null);
+  if (!sameAsPrev) {
+    const row = { state: nextState, at, reason: nextReason };
+    if (safeDetails) row.details = safeDetails;
+    job.lifecycle.push(row);
+    if (job.lifecycle.length > 200) {
+      job.lifecycle = job.lifecycle.slice(-200);
+    }
+  }
+  job.lifecycleState = nextState;
+  job.lifecycleReason = nextReason || null;
+  job.lifecycleUpdatedAt = at;
+  return !sameAsPrev;
+}
+
+function detectUnsafeWaitPattern(command) {
+  const text = String(command || "");
+  const lower = text.toLowerCase();
+  if (!lower.includes("pgrep") || !lower.includes("-f")) return [];
+  const hasLoop = /\bwhile\b|\buntil\b/.test(lower) || lower.includes("sleep ");
+  const warnings = [];
+  const re = /pgrep\s+-f\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gi;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const pattern = String(match[1] || match[2] || match[3] || "").trim();
+    if (!pattern) continue;
+    if (pattern.includes("[") && pattern.includes("]")) continue;
+    if (!lower.includes(String(pattern).toLowerCase())) continue;
+    warnings.push(
+      hasLoop
+        ? `unsafe wait-loop pattern: pgrep -f "${pattern}" may self-match`
+        : `risky pattern: pgrep -f "${pattern}" may self-match`
+    );
+  }
+  return Array.from(new Set(warnings)).slice(0, 10);
+}
+
+function resolvePathForCheck(rawPath, workdir) {
+  const p = String(rawPath || "").trim();
+  if (!p) return "";
+  if (path.isAbsolute(p)) return path.resolve(p);
+  return path.resolve(workdir || CONFIG.defaultWorkdir, p);
+}
+
+async function runCommandExitCheck({ cmd, workdir, timeoutSec = 30 }) {
+  const command = String(cmd || "").trim();
+  if (!command) return { ok: false, exitCode: 1, timedOut: false, stdout: "", stderr: "empty command" };
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd: workdir || CONFIG.defaultWorkdir,
+      env: buildChildProcessEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let done = false;
+    let timedOut = false;
+    const maxCapture = 2000;
+    const timeoutMs = Math.max(1, Math.min(600, Math.floor(Number(timeoutSec) || 30))) * 1000;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }, 2000).unref?.();
+    }, timeoutMs);
+    const finish = (exitCode, signal) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const code = typeof exitCode === "number" ? exitCode : signal ? 128 : 1;
+      resolve({
+        ok: code === 0 && !timedOut,
+        exitCode: code,
+        timedOut,
+        stdout: stdout.length > maxCapture ? stdout.slice(-maxCapture) : stdout,
+        stderr: stderr.length > maxCapture ? stderr.slice(-maxCapture) : stderr,
+      });
+    };
+    child.stdout.on("data", (buf) => {
+      stdout += buf.toString("utf8");
+      if (stdout.length > maxCapture * 4) stdout = stdout.slice(-maxCapture * 4);
+    });
+    child.stderr.on("data", (buf) => {
+      stderr += buf.toString("utf8");
+      if (stderr.length > maxCapture * 4) stderr = stderr.slice(-maxCapture * 4);
+    });
+    child.on("error", (err) => {
+      stderr += String(err && err.message ? err.message : err);
+      finish(1, null);
+    });
+    child.on("close", (code, signal) => finish(code, signal));
+  });
+}
+
+async function getFreeDiskGiB(targetPath) {
+  const p = String(targetPath || "").trim() || ".";
+  const resolved = path.resolve(p);
+  if (typeof fsp.statfs === "function") {
+    const stats = await fsp.statfs(resolved);
+    const bavail = Number(stats && stats.bavail != null ? stats.bavail : 0);
+    const bsize = Number(stats && stats.bsize != null ? stats.bsize : 0);
+    if (Number.isFinite(bavail) && Number.isFinite(bsize) && bavail >= 0 && bsize > 0) {
+      return (bavail * bsize) / (1024 ** 3);
+    }
+  }
+  const probe = await runCommandExitCheck({ cmd: `df -Pk ${safeShellArg(resolved)} | tail -n 1 | awk '{print $4}'`, workdir: "/" });
+  if (!probe.ok) throw new Error(probe.stderr || "df probe failed");
+  const kb = Number(String(probe.stdout || "").trim().split(/\s+/).pop());
+  if (!Number.isFinite(kb)) throw new Error("invalid df output");
+  return kb / (1024 ** 2);
+}
+
+async function runJobPreflightChecks({ command, workdir, preflight }) {
+  const checks = preflight && Array.isArray(preflight.checks) ? preflight.checks : [];
+  const results = [];
+  for (let i = 0; i < checks.length; i += 1) {
+    const check = checks[i];
+    const type = String(check && check.type ? check.type : "").trim().toLowerCase();
+    if (type === "path_exists") {
+      const resolved = resolvePathForCheck(check.path, workdir);
+      let exists = false;
+      try {
+        await fsp.access(resolved);
+        exists = true;
+      } catch {
+        exists = false;
+      }
+      const row = { index: i, type, ok: exists, path: String(check.path || ""), resolved };
+      results.push(row);
+      if (!exists && preflight.onFail !== "warn") {
+        return { ok: false, failed: row, results };
+      }
+      continue;
+    }
+    if (type === "cmd_exit_zero") {
+      const cmd = String(check.cmd || "").trim();
+      const timeoutSec = check.timeoutSec == null ? 30 : Number(check.timeoutSec);
+      const probe = await runCommandExitCheck({ cmd, workdir, timeoutSec });
+      const row = {
+        index: i,
+        type,
+        ok: probe.ok,
+        cmd,
+        exitCode: probe.exitCode,
+        timedOut: probe.timedOut,
+        stderr: taskTextPreview(probe.stderr, 240),
+      };
+      results.push(row);
+      if (!probe.ok && preflight.onFail !== "warn") {
+        return { ok: false, failed: row, results };
+      }
+      continue;
+    }
+    if (type === "min_free_disk_gb") {
+      const resolved = resolvePathForCheck(check.path || ".", workdir);
+      let freeGiB = 0;
+      let errText = "";
+      try {
+        freeGiB = await getFreeDiskGiB(resolved);
+      } catch (err) {
+        errText = String(err && err.message ? err.message : err);
+      }
+      const needGiB = Number(check.gb || 0);
+      const ok = !errText && Number.isFinite(freeGiB) && freeGiB >= needGiB;
+      const row = {
+        index: i,
+        type,
+        ok,
+        path: String(check.path || "."),
+        resolved,
+        requiredGiB: needGiB,
+        freeGiB: Number.isFinite(freeGiB) ? Number(freeGiB.toFixed(2)) : null,
+        error: errText || null,
+      };
+      results.push(row);
+      if (!ok && preflight.onFail !== "warn") {
+        return { ok: false, failed: row, results };
+      }
+      continue;
+    }
+    const row = { index: i, type, ok: false, error: `unsupported preflight check type: ${type}` };
+    results.push(row);
+    if (preflight.onFail !== "warn") return { ok: false, failed: row, results };
+  }
+  return { ok: true, failed: null, results };
+}
+
+async function evaluateJobLaunchGuards({ command, workdir, preflight }) {
+  const warnings = [];
+  const waitWarnings = detectUnsafeWaitPattern(command);
+  if (waitWarnings.length > 0) {
+    if (CONFIG.waitPatternGuardMode === "reject") {
+      return {
+        ok: false,
+        reason: "wait_pattern_guard_reject",
+        warnings: waitWarnings,
+        preflight: null,
+      };
+    }
+    if (CONFIG.waitPatternGuardMode === "warn") {
+      warnings.push(...waitWarnings);
+    }
+  }
+
+  const hasChecks = Boolean(preflight && Array.isArray(preflight.checks) && preflight.checks.length > 0);
+  if (!hasChecks || !CONFIG.jobPreflightEnabled) {
+    if (hasChecks && !CONFIG.jobPreflightEnabled) {
+      warnings.push("preflight checks supplied but RELAY_JOB_PREFLIGHT_ENABLED=false");
+    }
+    return {
+      ok: true,
+      reason: hasChecks && !CONFIG.jobPreflightEnabled ? "preflight_disabled" : "",
+      warnings,
+      preflight: null,
+    };
+  }
+
+  const preflightRes = await runJobPreflightChecks({ command, workdir, preflight });
+  if (!preflightRes.ok) {
+    if (preflight && preflight.onFail === "warn") {
+      warnings.push(`preflight warning: ${JSON.stringify(preflightRes.failed || {})}`);
+      return { ok: true, reason: "preflight_warn", warnings, preflight: preflightRes };
+    }
+    return { ok: false, reason: "preflight_failed", warnings, preflight: preflightRes };
+  }
+  return { ok: true, reason: "preflight_passed", warnings, preflight: preflightRes };
+}
+
+function isAllowedRequiredFilePath(absPath) {
+  if (!absPath) return false;
+  return CONFIG.allowedWorkdirRoots.some((root) => isSubPath(root, absPath));
+}
+
+function resolveRequiredArtifactSpecs(requireFiles, workdir) {
+  const specs = [];
+  const files = Array.isArray(requireFiles) ? requireFiles : [];
+  for (const rawItem of files) {
+    const raw = String(rawItem || "").trim();
+    if (!raw) continue;
+    const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(workdir || CONFIG.defaultWorkdir, raw);
+    const allowed = isAllowedRequiredFilePath(resolved);
+    specs.push({ raw, resolved, allowed });
+  }
+  return specs;
+}
+
+async function listMissingRequiredFiles(specs) {
+  const missing = [];
+  for (const spec of specs || []) {
+    if (!spec.allowed) {
+      missing.push({ raw: spec.raw, resolved: spec.resolved, reason: "outside_allowed_roots" });
+      continue;
+    }
+    try {
+      await fsp.access(spec.resolved);
+    } catch {
+      missing.push({ raw: spec.raw, resolved: spec.resolved, reason: "not_found" });
+    }
+  }
+  return missing;
+}
+
+function extractVrRunArg(command, name) {
+  const text = String(command || "");
+  const re = new RegExp(`--${name}\\s+(?:"([^"]+)"|'([^']+)'|([^\\s"']+))`, "i");
+  const m = text.match(re);
+  if (!m) return "";
+  return String(m[1] || m[2] || m[3] || "").trim();
+}
+
+function inferVrRunRequireFiles(command) {
+  const cmd = String(command || "");
+  if (!/scripts\/vr_run\.sh\b/.test(cmd)) return [];
+  const runDirArg = extractVrRunArg(cmd, "run-dir");
+  const runIdArg = extractVrRunArg(cmd, "run-id");
+  const runDir = runDirArg || (runIdArg ? `exp/results/${runIdArg}` : "");
+  if (!runDir) return [];
+  return [`${runDir}/metrics.json`, `${runDir}/meta.json`, `${runDir}/train.log`];
+}
+
 async function startJobProcess({ conversationKey, session, command, workdir, description }) {
   const cmd = String(command || "").trim();
   if (!cmd) return { ok: false, error: "missing command", job: null };
@@ -4790,8 +5371,18 @@ async function startJobProcess({ conversationKey, session, command, workdir, des
     exitCodePath: exitCodeFile,
     pidPath: pidFile,
     exitCode: null,
+    exitedAt: null,
+    lifecycleState: null,
+    lifecycleReason: null,
+    lifecycleUpdatedAt: null,
+    lifecycle: [],
+    visibilityStatus: "ok",
+    visibilityLastHeartbeatAt: null,
+    visibilityDegradedAt: null,
     watch: null,
   };
+  appendJobLifecycleTransition(job, "queued", "job_created", { conversationKey, workdir: absWorkdir });
+  appendJobLifecycleTransition(job, "running", "process_spawned", { pid: job.pid || null });
   ensureJobsShape(session);
   session.jobs.push(job);
   session.updatedAt = nowIso();
@@ -4804,7 +5395,7 @@ function jobWatcherKey(conversationKey, jobId) {
   return `${String(conversationKey || "")}::${String(jobId || "")}`;
 }
 
-function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault } = {}) {
+function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault, jobCommand, workdir } = {}) {
   const watch = rawWatch && typeof rawWatch === "object" && !Array.isArray(rawWatch) ? rawWatch : null;
   const everySec =
     watch && watch.everySec != null ? Number(watch.everySec) : Number(everySecDefault != null ? everySecDefault : 300);
@@ -4813,6 +5404,25 @@ function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault }
   const thenTask = watch && watch.thenTask != null ? String(watch.thenTask || "").trim() : "";
   const thenTaskDescription = watch && watch.thenTaskDescription != null ? String(watch.thenTaskDescription || "").trim() : "";
   const runTasks = Boolean(watch && watch.runTasks);
+  const rawRequireFiles = watch && Array.isArray(watch.requireFiles) ? watch.requireFiles : [];
+  const requireFiles = [];
+  for (const item of rawRequireFiles) {
+    const p = String(item || "").trim();
+    if (!p) continue;
+    requireFiles.push(p.length > 600 ? p.slice(0, 600) : p);
+    if (requireFiles.length >= 32) break;
+  }
+  if (thenTask && requireFiles.length === 0) {
+    const inferred = inferVrRunRequireFiles(jobCommand || "");
+    for (const p of inferred) {
+      if (!requireFiles.includes(p)) requireFiles.push(p);
+    }
+  }
+  const readyTimeoutSecRaw = watch && watch.readyTimeoutSec != null ? Number(watch.readyTimeoutSec) : null;
+  const readyPollSecRaw = watch && watch.readyPollSec != null ? Number(watch.readyPollSec) : null;
+  const onMissingRaw = watch && watch.onMissing != null ? String(watch.onMissing || "").trim().toLowerCase() : "";
+  const firstPostRegexRaw = watch && watch.firstPostRegex != null ? String(watch.firstPostRegex || "").trim() : "";
+  const hasRequiredFiles = requireFiles.length > 0;
 
   return {
     enabled: true,
@@ -4821,6 +5431,20 @@ function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault }
     thenTask: thenTask ? (thenTask.length > 2000 ? thenTask.slice(0, 2000) : thenTask) : null,
     thenTaskDescription: thenTaskDescription ? taskTextPreview(thenTaskDescription, 200) : null,
     runTasks,
+    requireFiles,
+    readyTimeoutSec: hasRequiredFiles
+      ? Number.isFinite(readyTimeoutSecRaw)
+        ? Math.max(10, Math.min(86400, Math.floor(readyTimeoutSecRaw)))
+        : CONFIG.watchRequireFilesDefaultTimeoutSec
+      : null,
+    readyPollSec: hasRequiredFiles
+      ? Number.isFinite(readyPollSecRaw)
+        ? Math.max(1, Math.min(3600, Math.floor(readyPollSecRaw)))
+        : CONFIG.watchRequireFilesDefaultPollSec
+      : null,
+    onMissing: onMissingRaw === "enqueue" ? "enqueue" : "block",
+    long: watch && watch.long != null ? Boolean(watch.long) : null,
+    firstPostRegex: firstPostRegexRaw ? firstPostRegexRaw.slice(0, 300) : null,
   };
 }
 
@@ -4845,6 +5469,7 @@ async function stopJobWatcher(conversationKey, jobId) {
   try {
     if (watcher.timer) clearInterval(watcher.timer);
   } catch {}
+  watcher.awaitPromise = null;
   jobWatchersByKey.delete(key);
   return true;
 }
@@ -4872,9 +5497,293 @@ async function maybeStartTaskRunner(conversationKey, channel, session, meta) {
   return { ok: true, started: true };
 }
 
+function shouldTreatWatcherAsLongRun(job, watch) {
+  if (watch && watch.long === true) return true;
+  const cmd = String(job && job.command ? job.command : "").toLowerCase();
+  const hints = /\b(train|training|epoch|sweep|ablation|benchmark|experiment|overnight|eval|evaluation)\b/;
+  const watchEvery = Number(watch && watch.everySec != null ? watch.everySec : 0);
+  return watchEvery >= 120 && hints.test(cmd);
+}
+
+function markWatcherHeartbeat(watcher, job) {
+  if (!watcher || !watcher.visibility || !watcher.visibility.enabled) return false;
+  watcher.visibility.startupSent = true;
+  watcher.visibility.lastHeartbeatAt = Date.now();
+  if (!job || typeof job !== "object") return false;
+  const at = nowIso();
+  let changed = false;
+  if (job.visibilityLastHeartbeatAt !== at) {
+    job.visibilityLastHeartbeatAt = at;
+    changed = true;
+  }
+  if (!job.visibilityStatus) {
+    job.visibilityStatus = "ok";
+    changed = true;
+  }
+  return changed;
+}
+
+async function finalizeWatchedJobExit({
+  watcher,
+  conversationKey,
+  session,
+  job,
+  channel,
+  exitCode,
+  forceStatus = null,
+  allowThenTask = true,
+  prefaceLines = [],
+  lifecycleReason = "",
+  lifecycleDetails = null,
+}) {
+  const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
+  const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
+  const thenTaskDescription = watch && watch.thenTaskDescription ? String(watch.thenTaskDescription || "").trim() : "";
+  const runTasks = Boolean(watch && watch.runTasks);
+
+  if (!job.exitedAt) {
+    job.exitedAt = nowIso();
+    appendJobLifecycleTransition(job, "exited", "process_exit", { exitCode });
+  }
+  job.exitCode = exitCode;
+  if (forceStatus) {
+    job.status = forceStatus;
+  } else if (job.status === "running") {
+    job.status = exitCode === 0 ? "done" : "failed";
+  }
+  job.finishedAt = job.finishedAt || nowIso();
+  if (watch) watch.enabled = false;
+
+  if (job.status === "blocked") {
+    appendJobLifecycleTransition(job, "blocked", lifecycleReason || "blocked", lifecycleDetails || { exitCode });
+  } else if (job.status === "failed" || job.status === "canceled") {
+    appendJobLifecycleTransition(job, "failed", lifecycleReason || "job_failed", lifecycleDetails || { exitCode });
+  } else if (!allowThenTask || !thenTask) {
+    appendJobLifecycleTransition(job, "completed", lifecycleReason || "job_completed", lifecycleDetails || { exitCode });
+  }
+  session.updatedAt = nowIso();
+  await queueSaveState();
+  await stopJobWatcher(conversationKey, job.id);
+
+  const startedAtMs = Date.parse(job.startedAt || "") || Date.now();
+  const elapsed = formatElapsed(Date.now() - startedAtMs);
+  const tailLines = watcher && Number.isFinite(Number(watcher.tailLines)) ? Number(watcher.tailLines) : 50;
+  const tail = await readTailLines(job.logPath, tailLines, 128 * 1024);
+  const tailStats = summarizeTailText(tail);
+  const taskCounts = summarizeTaskCounts(session.tasks);
+  const taskSummary = `tasks pending=${taskCounts.pending} running=${taskCounts.running} done=${taskCounts.done} failed=${taskCounts.failed} blocked=${taskCounts.blocked} canceled=${taskCounts.canceled}`;
+  const jobDescription = jobDisplayDescription(job, 96);
+  const visibility = String(job.visibilityStatus || "ok");
+  const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed}, visibility ${visibility})${
+    jobDescription ? ` | ${jobDescription}` : ""
+  }`;
+
+  const lines = [];
+  lines.push(`${header} -> finished (exit ${exitCode})`);
+  lines.push(taskSummary);
+  for (const line of prefaceLines || []) {
+    if (line) lines.push(String(line));
+  }
+  if (CONFIG.jobsWatchCompact) {
+    lines.push(`log: \`${job.logPath}\``);
+    if (tail) {
+      lines.push(`final output: ${tailStats.lineCount} lines, ${tailStats.charCount} chars`);
+      if (CONFIG.jobsWatchIncludeTailOnFinish) {
+        const snippet = compactTailSnippet(tail, CONFIG.jobsWatchCompactTailLines, CONFIG.jobsWatchCompactTailMaxChars);
+        if (snippet) lines.push("", "tail excerpt:", snippet);
+      }
+    } else {
+      lines.push("final output: (no captured tail)");
+    }
+  } else if (tail) {
+    lines.push("", "log tail:", tail);
+  }
+  if (channel) {
+    await sendLongToChannel(channel, lines.join("\n"));
+    markWatcherHeartbeat(watcher, job);
+    session.updatedAt = nowIso();
+    await queueSaveState();
+  }
+
+  try {
+    await handleResearchJobCompletion({
+      conversationKey,
+      session,
+      job,
+      exitCode,
+      channel,
+    });
+  } catch (err) {
+    logRelayEvent("research.job.finalize.error", {
+      conversationKey,
+      jobId: job.id,
+      error: String(err && err.message ? err.message : err).slice(0, 240),
+    });
+  }
+
+  if (!allowThenTask || !thenTask) {
+    return;
+  }
+  if (!CONFIG.tasksEnabled) {
+    if (channel) await channel.send("Job follow-up task requested, but tasks are disabled (RELAY_TASKS_ENABLED=false).");
+    return;
+  }
+  const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
+  if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
+    if (channel) await channel.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
+    return;
+  }
+  const fallbackDescription = thenTaskDescription || `Follow-up for ${job.id}${jobDescription ? `: ${jobDescription}` : ""}`;
+  const task = createTask(session, thenTask, {
+    description: fallbackDescription,
+    sourceJobId: job.id,
+  });
+  session.tasks.push(task);
+  appendJobLifecycleTransition(job, "callback_queued", "then_task_enqueued", { taskId: task.id });
+  session.updatedAt = nowIso();
+  await queueSaveState();
+  logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
+  if (channel) {
+    const taskLabel = taskDisplayDescription(task, 96) || "(no description)";
+    await channel.send(`Queued follow-up task \`${task.id}\`${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}`);
+    markWatcherHeartbeat(watcher, job);
+    session.updatedAt = nowIso();
+    await queueSaveState();
+  }
+
+  if (runTasks) {
+    appendJobLifecycleTransition(job, "callback_running", "task_runner_requested", { taskId: task.id });
+    session.updatedAt = nowIso();
+    await queueSaveState();
+    await maybeStartTaskRunner(conversationKey, channel, session, {
+      isDm: !session.lastGuildId,
+      isThread: Boolean(channel && channel.isThread && channel.isThread()),
+    });
+  }
+  appendJobLifecycleTransition(job, "completed", runTasks ? "callback_dispatched" : "callback_queued", {
+    taskId: task.id,
+    runTasks,
+  });
+  session.updatedAt = nowIso();
+  await queueSaveState();
+}
+
+async function awaitArtifactsThenFinalize({
+  watcher,
+  conversationKey,
+  session,
+  job,
+  channel,
+  exitCode,
+  specs,
+  timeoutSec,
+  pollSec,
+  onMissing,
+}) {
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + Math.max(10, timeoutSec) * 1000;
+  const details = {
+    timeoutSec: Math.max(10, timeoutSec),
+    pollSec: Math.max(1, pollSec),
+    required: specs.map((s) => s.raw),
+  };
+  logRelayEvent("job.await_artifacts.start", { conversationKey, jobId: job.id, ...details });
+  appendJobLifecycleTransition(job, "awaiting_artifacts", "waiting_for_required_files", details);
+  session.updatedAt = nowIso();
+  await queueSaveState();
+
+  const disallowed = (specs || []).filter((s) => !s.allowed);
+  if (disallowed.length > 0) {
+    const blockedLines = [
+      "required artifact paths include entries outside allowed workdir roots:",
+      ...disallowed.map((m) => `- ${m.raw}`),
+    ];
+    await finalizeWatchedJobExit({
+      watcher,
+      conversationKey,
+      session,
+      job,
+      channel,
+      exitCode,
+      forceStatus: "blocked",
+      allowThenTask: onMissing === "enqueue",
+      prefaceLines: blockedLines,
+      lifecycleReason: "artifact_path_outside_allowed_roots",
+      lifecycleDetails: { disallowed: disallowed.map((s) => s.raw) },
+    });
+    return;
+  }
+
+  while (true) {
+    const missing = await listMissingRequiredFiles(specs);
+    if (missing.length === 0) {
+      logRelayEvent("job.await_artifacts.ready", { conversationKey, jobId: job.id, waitedSec: Math.floor((Date.now() - startedAt) / 1000) });
+      await finalizeWatchedJobExit({
+        watcher,
+        conversationKey,
+        session,
+        job,
+        channel,
+        exitCode,
+        forceStatus: null,
+        allowThenTask: true,
+        prefaceLines: [`artifacts ready (${specs.length}): callback processing enabled.`],
+        lifecycleReason: "artifacts_ready",
+        lifecycleDetails: { waitedSec: Math.floor((Date.now() - startedAt) / 1000), required: specs.map((s) => s.raw) },
+      });
+      return;
+    }
+    if (Date.now() >= deadlineAt) {
+      logRelayEvent("job.await_artifacts.timeout", {
+        conversationKey,
+        jobId: job.id,
+        waitedSec: Math.floor((Date.now() - startedAt) / 1000),
+        missing: missing.map((m) => m.raw).slice(0, 20),
+      });
+      const missingList = missing.map((m) => `- ${m.raw} (${m.reason})`);
+      const timedOutLines = [
+        `artifact wait timeout after ${Math.floor((Date.now() - startedAt) / 1000)}s; missing files:`,
+        ...missingList,
+      ];
+      if (onMissing === "enqueue") {
+        await finalizeWatchedJobExit({
+          watcher,
+          conversationKey,
+          session,
+          job,
+          channel,
+          exitCode,
+          forceStatus: "done",
+          allowThenTask: true,
+          prefaceLines: [...timedOutLines, "onMissing=enqueue: callback will run anyway."],
+          lifecycleReason: "artifact_timeout_enqueue",
+          lifecycleDetails: { missing: missing.map((m) => m.raw) },
+        });
+      } else {
+        await finalizeWatchedJobExit({
+          watcher,
+          conversationKey,
+          session,
+          job,
+          channel,
+          exitCode,
+          forceStatus: "blocked",
+          allowThenTask: false,
+          prefaceLines: [...timedOutLines, "onMissing=block: callback suppressed."],
+          lifecycleReason: "artifact_timeout_blocked",
+          lifecycleDetails: { missing: missing.map((m) => m.raw) },
+        });
+      }
+      return;
+    }
+    await sleepMs(Math.max(1, pollSec) * 1000);
+  }
+}
+
 async function tickJobWatcher(watcher) {
   if (!watcher || typeof watcher !== "object") return;
   if (watcher.inFlight) return;
+  if (watcher.awaitPromise) return;
   watcher.inFlight = true;
   const { conversationKey, jobId, channelId } = watcher;
 
@@ -4903,92 +5812,91 @@ async function tickJobWatcher(watcher) {
     const jobDescription = jobDisplayDescription(job, 96);
     const taskCounts = summarizeTaskCounts(session.tasks);
     const taskSummary = `tasks pending=${taskCounts.pending} running=${taskCounts.running} done=${taskCounts.done} failed=${taskCounts.failed} blocked=${taskCounts.blocked} canceled=${taskCounts.canceled}`;
-    const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed})${jobDescription ? ` | ${jobDescription}` : ""}`;
+    const visibility = String(job.visibilityStatus || "ok");
+    const header = `[JOB ${job.id}] ${job.status || "unknown"} (elapsed ${elapsed}, visibility ${visibility})${
+      jobDescription ? ` | ${jobDescription}` : ""
+    }`;
 
     if (exitRes.ok) {
-      // Finalization is intentionally out-of-queue so callback tasks still fire even if
-      // a foreground agent run in the same conversation is blocked or long-running.
       const code = exitRes.code;
       const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
-      const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
-      const thenTaskDescription = watch && watch.thenTaskDescription ? String(watch.thenTaskDescription || "").trim() : "";
-      const runTasks = Boolean(watch && watch.runTasks);
-
-      job.exitCode = code;
-      if (job.status === "running") {
-        job.status = code === 0 ? "done" : "failed";
+      if (!job.exitedAt) {
+        job.exitedAt = nowIso();
+        appendJobLifecycleTransition(job, "exited", "process_exit", { exitCode: code });
+        session.updatedAt = nowIso();
+        await queueSaveState();
       }
-      job.finishedAt = job.finishedAt || nowIso();
-      if (watch) watch.enabled = false;
-      session.updatedAt = nowIso();
-      await queueSaveState();
-      await stopJobWatcher(conversationKey, jobId);
 
-      const lines = [];
-      lines.push(`${header} -> finished (exit ${code})`);
-      lines.push(taskSummary);
-      if (CONFIG.jobsWatchCompact) {
-        lines.push(`log: \`${job.logPath}\``);
-        if (tail) {
-          lines.push(`final output: ${tailStats.lineCount} lines, ${tailStats.charCount} chars`);
-          if (CONFIG.jobsWatchIncludeTailOnFinish) {
-            const snippet = compactTailSnippet(tail, CONFIG.jobsWatchCompactTailLines, CONFIG.jobsWatchCompactTailMaxChars);
-            if (snippet) lines.push("", "tail excerpt:", snippet);
+      const requireFilesEnabled = CONFIG.watchRequireFilesEnabled && code === 0 && watch && Array.isArray(watch.requireFiles) && watch.requireFiles.length > 0;
+      if (requireFilesEnabled) {
+        const specs = resolveRequiredArtifactSpecs(watch.requireFiles, job.workdir || session.workdir || CONFIG.defaultWorkdir);
+        const timeoutSec = Number.isFinite(Number(watch.readyTimeoutSec))
+          ? Number(watch.readyTimeoutSec)
+          : CONFIG.watchRequireFilesDefaultTimeoutSec;
+        const pollSec = Number.isFinite(Number(watch.readyPollSec))
+          ? Number(watch.readyPollSec)
+          : CONFIG.watchRequireFilesDefaultPollSec;
+        const onMissing = String(watch.onMissing || "block").trim().toLowerCase() === "enqueue" ? "enqueue" : "block";
+        if (!watcher.awaitPromise) {
+          const line = `required artifacts gate active: waiting for ${specs.length} file(s), timeout=${timeoutSec}s poll=${pollSec}s`;
+          if (ch) {
+            await ch.send(`[JOB ${job.id}] ${line}`);
+            markWatcherHeartbeat(watcher, job);
+            session.updatedAt = nowIso();
+            await queueSaveState();
           }
-        } else {
-          lines.push("final output: (no captured tail)");
+          watcher.awaitPromise = awaitArtifactsThenFinalize({
+            watcher,
+            conversationKey,
+            session,
+            job,
+            channel: ch,
+            exitCode: code,
+            specs,
+            timeoutSec,
+            pollSec,
+            onMissing,
+          })
+            .catch(async (err) => {
+              logRelayEvent("job.await_artifacts.error", {
+                conversationKey,
+                jobId: job.id,
+                error: String(err && err.message ? err.message : err).slice(0, 240),
+              });
+              await finalizeWatchedJobExit({
+                watcher,
+                conversationKey,
+                session,
+                job,
+                channel: ch,
+                exitCode: code,
+                forceStatus: "blocked",
+                allowThenTask: false,
+                prefaceLines: [
+                  `artifact wait failed with runtime error: ${String(err && err.message ? err.message : err)}`,
+                ],
+                lifecycleReason: "artifact_wait_runtime_error",
+                lifecycleDetails: { error: String(err && err.message ? err.message : err) },
+              });
+            })
+            .finally(() => {
+            watcher.awaitPromise = null;
+          });
         }
-      } else if (tail) {
-        lines.push("", "log tail:", tail);
-      }
-      if (ch) await sendLongToChannel(ch, lines.join("\n"));
-
-      try {
-        await handleResearchJobCompletion({
+      } else {
+        await finalizeWatchedJobExit({
+          watcher,
           conversationKey,
           session,
           job,
-          exitCode: code,
           channel: ch,
+          exitCode: code,
+          forceStatus: null,
+          allowThenTask: true,
+          prefaceLines: [],
+          lifecycleReason: code === 0 ? "process_exit_zero" : "process_exit_nonzero",
+          lifecycleDetails: { exitCode: code },
         });
-      } catch (err) {
-        logRelayEvent("research.job.finalize.error", {
-          conversationKey,
-          jobId: job.id,
-          error: String(err && err.message ? err.message : err).slice(0, 240),
-        });
-      }
-
-      if (thenTask) {
-        if (!CONFIG.tasksEnabled) {
-          if (ch) await ch.send("Job follow-up task requested, but tasks are disabled (RELAY_TASKS_ENABLED=false).");
-          return;
-        }
-        const pending = (session.tasks || []).filter((t) => t && t.status === "pending").length;
-        if (CONFIG.tasksMaxPending > 0 && pending >= CONFIG.tasksMaxPending) {
-          if (ch) await ch.send(`Job follow-up task skipped: task queue full (pending=${pending}, max=${CONFIG.tasksMaxPending}).`);
-          return;
-        }
-        const fallbackDescription = thenTaskDescription || `Follow-up for ${job.id}${jobDescription ? `: ${jobDescription}` : ""}`;
-        const task = createTask(session, thenTask, {
-          description: fallbackDescription,
-          sourceJobId: job.id,
-        });
-        session.tasks.push(task);
-        session.updatedAt = nowIso();
-        await queueSaveState();
-        logRelayEvent("job.then_task.queued", { conversationKey, jobId: job.id, taskId: task.id });
-        if (ch) {
-          const taskLabel = taskDisplayDescription(task, 96) || "(no description)";
-          await ch.send(`Queued follow-up task \`${task.id}\`${task.sourceJobId ? ` from \`${task.sourceJobId}\`` : ""}: ${taskLabel}`);
-        }
-
-        if (runTasks) {
-          await maybeStartTaskRunner(conversationKey, ch, session, {
-            isDm: !session.lastGuildId,
-            isThread: Boolean(ch && ch.isThread && ch.isThread()),
-          });
-        }
       }
       return;
     }
@@ -5015,11 +5923,52 @@ async function tickJobWatcher(watcher) {
           if (snippet) lines.push("", "tail excerpt:", snippet);
         }
         await sendLongToChannel(ch, lines.join("\n"));
+        markWatcherHeartbeat(watcher, job);
+        session.updatedAt = nowIso();
+        await queueSaveState();
       } else {
         await sendLongToChannel(ch, [header, taskSummary, "", "log tail:", tail].join("\n"));
+        markWatcherHeartbeat(watcher, job);
+        session.updatedAt = nowIso();
+        await queueSaveState();
       }
     } else if (CONFIG.jobsWatchPostNoChange) {
       await ch.send(`${header} | ${taskSummary} (no new output)`);
+      markWatcherHeartbeat(watcher, job);
+      session.updatedAt = nowIso();
+      await queueSaveState();
+    }
+
+    if (watcher.visibility && watcher.visibility.enabled) {
+      const nowMs = Date.now();
+      const startupDeadlineMs = Math.max(10, CONFIG.visibilityStartupHeartbeatSec) * 1000;
+      if (!watcher.visibility.startupSent && nowMs - watcher.visibility.startedAtMs >= startupDeadlineMs) {
+        watcher.visibility.degraded = true;
+        if (job.visibilityStatus !== "degraded") {
+          job.visibilityStatus = "degraded";
+          job.visibilityDegradedAt = nowIso();
+          appendJobLifecycleTransition(job, "running", "visibility_degraded_startup_timeout", {
+            timeoutSec: CONFIG.visibilityStartupHeartbeatSec,
+          });
+          session.updatedAt = nowIso();
+          await queueSaveState();
+        }
+        if (ch) {
+          await ch.send(
+            `[JOB ${job.id}] visibility degraded: no startup heartbeat observed within ${CONFIG.visibilityStartupHeartbeatSec}s.`
+          );
+          markWatcherHeartbeat(watcher, job);
+          session.updatedAt = nowIso();
+          await queueSaveState();
+        }
+      }
+      const heartbeatEveryMs = Math.max(30, CONFIG.visibilityHeartbeatEverySec) * 1000;
+      if (ch && nowMs - Number(watcher.visibility.lastHeartbeatAt || 0) >= heartbeatEveryMs) {
+        await ch.send(`${header} | ${taskSummary} (heartbeat)`);
+        markWatcherHeartbeat(watcher, job);
+        session.updatedAt = nowIso();
+        await queueSaveState();
+      }
     }
   } catch (err) {
     logRelayEvent("job.watch.error", {
@@ -5037,6 +5986,8 @@ async function startJobWatcher({ conversationKey, session, job, channelId, watch
   const normalized = normalizeJobWatchConfig(watchConfig, {
     everySecDefault: CONFIG.jobsAutoWatchEverySec,
     tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+    jobCommand: job.command || "",
+    workdir: job.workdir || session.workdir || CONFIG.defaultWorkdir,
   });
 
   job.watch = { ...normalized };
@@ -5056,6 +6007,14 @@ async function startJobWatcher({ conversationKey, session, job, channelId, watch
     everySec: normalized.everySec,
     inFlight: false,
     lastTailHash: "",
+    awaitPromise: null,
+    visibility: {
+      enabled: Boolean(CONFIG.visibilityGateEnabled && shouldTreatWatcherAsLongRun(job, normalized)),
+      startedAtMs: Date.now(),
+      startupSent: false,
+      lastHeartbeatAt: 0,
+      degraded: false,
+    },
     timer: null,
   };
   watcher.timer = setInterval(() => void tickJobWatcher(watcher), watcher.everySec * 1000);
@@ -5071,11 +6030,26 @@ async function startJobWatcher({ conversationKey, session, job, channelId, watch
       const parts = [`[JOB ${job.id}] watcher started (every ${watcher.everySec}s, tail ${watcher.tailLines} lines, mode ${mode})`];
       if (jobDescription) parts.push(`desc: ${jobDescription}`);
       if (followUpDescription) parts.push(`follow-up: ${followUpDescription}`);
+      if (watcher.visibility && watcher.visibility.enabled) {
+        parts.push(
+          `visibility=startup<=${CONFIG.visibilityStartupHeartbeatSec}s heartbeat<=${CONFIG.visibilityHeartbeatEverySec}s`
+        );
+      }
       await ch.send(parts.join(" | "));
+      markWatcherHeartbeat(watcher, job);
+      session.updatedAt = nowIso();
+      await queueSaveState();
     } catch {}
   }
   void tickJobWatcher(watcher);
-  logRelayEvent("job.watch.start", { conversationKey, jobId: job.id, everySec: watcher.everySec, tailLines: watcher.tailLines });
+  logRelayEvent("job.watch.start", {
+    conversationKey,
+    jobId: job.id,
+    everySec: watcher.everySec,
+    tailLines: watcher.tailLines,
+    requireFiles: Array.isArray(normalized.requireFiles) ? normalized.requireFiles.length : 0,
+    visibilityGate: Boolean(watcher.visibility && watcher.visibility.enabled),
+  });
   return { ok: true, watcher };
 }
 
@@ -5426,6 +6400,19 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
           continue;
         }
         const cmd = String(action.command || "").trim();
+        const guardRes = await evaluateJobLaunchGuards({
+          command: cmd,
+          workdir: session.workdir || CONFIG.defaultWorkdir,
+          preflight: action.preflight || null,
+        });
+        if (guardRes.warnings && guardRes.warnings.length > 0) {
+          lines.push(`- job_start guard warnings: ${guardRes.warnings.join(" | ")}`);
+        }
+        if (!guardRes.ok) {
+          const failed = guardRes.preflight && guardRes.preflight.failed ? JSON.stringify(guardRes.preflight.failed) : "";
+          lines.push(`- job_start blocked by guard (${guardRes.reason})${failed ? `: ${failed}` : ""}`);
+          continue;
+        }
         const started = await startJobProcess({
           conversationKey,
           session,
@@ -5446,6 +6433,8 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
           const watchCfg = normalizeJobWatchConfig(action.watch, {
             everySecDefault: CONFIG.jobsAutoWatchEverySec,
             tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+            jobCommand: cmd,
+            workdir: session.workdir || CONFIG.defaultWorkdir,
           });
           const watchRes = await startJobWatcher({
             conversationKey,
@@ -5472,6 +6461,8 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
         const watchCfg = normalizeJobWatchConfig(action.watch || {}, {
           everySecDefault: CONFIG.jobsAutoWatchEverySec,
           tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+          jobCommand: job.command || "",
+          workdir: job.workdir || session.workdir || CONFIG.defaultWorkdir,
         });
         const res = await startJobWatcher({
           conversationKey,
@@ -5498,7 +6489,9 @@ async function executeRelayActions({ actions, errors, conversationKey, session, 
         const pid = job.pid;
         const killed = pid ? killProcessGroup(pid, "SIGTERM") : false;
         job.status = "canceled";
+        job.exitedAt = job.exitedAt || nowIso();
         job.finishedAt = job.finishedAt || nowIso();
+        appendJobLifecycleTransition(job, "failed", "job_stop_requested", { signal: "SIGTERM", pid: pid || null, killed });
         session.updatedAt = nowIso();
         await queueSaveState();
         void stopJobWatcher(conversationKey, job.id);
@@ -6732,6 +7725,8 @@ async function handleCommand(message, session, command, conversationKey) {
     const runningJob = findLatestJob(session, { requireRunning: true });
     const runningJobElapsed = runningJob ? formatElapsed(Date.now() - (Date.parse(runningJob.startedAt || "") || Date.now())) : "";
     const runningJobDesc = runningJob ? jobDisplayDescription(runningJob, 80) : "";
+    const runningJobVisibility = runningJob ? String(runningJob.visibilityStatus || "ok") : "";
+    const runningJobLifecycle = runningJob ? String(runningJob.lifecycleState || "") : "";
     await message.reply(
       [
         `${AGENT_SESSION_LABEL}: ${session.threadId || "none"}`,
@@ -6741,7 +7736,7 @@ async function handleCommand(message, session, command, conversationKey) {
         `research: enabled=${Boolean(session.research && session.research.enabled)} auto=${Boolean(session.auto && session.auto.research)} project=${researchRoot || "none"}`,
         `tasks: pending=${taskCounts.pending} running=${taskCounts.running} done=${taskCounts.done} failed=${taskCounts.failed} blocked=${taskCounts.blocked} canceled=${taskCounts.canceled}`,
         runningJob
-          ? `job: running \`${runningJob.id}\` elapsed=${runningJobElapsed}${runningJobDesc ? ` desc=${runningJobDesc}` : ""}`
+          ? `job: running \`${runningJob.id}\` elapsed=${runningJobElapsed}${runningJobDesc ? ` desc=${runningJobDesc}` : ""}${runningJobVisibility ? ` visibility=${runningJobVisibility}` : ""}${runningJobLifecycle ? ` state=${runningJobLifecycle}` : ""}`
           : "job: none",
         `queue: ${isRunning ? "busy (request in progress)" : "idle"}`,
       ].join("\n")
@@ -7714,8 +8709,10 @@ async function handleCommand(message, session, command, conversationKey) {
             ? ` elapsed=${formatElapsed((Date.parse(j.finishedAt) || now) - (Date.parse(j.startedAt || "") || now))}`
             : "";
         const exitStr = j.exitCode != null ? ` exit=${j.exitCode}` : "";
+        const lifecycleStr = j.lifecycleState ? ` state=${j.lifecycleState}` : "";
+        const visibilityStr = j.visibilityStatus ? ` visibility=${j.visibilityStatus}` : "";
         const desc = jobDisplayDescription(j, 60);
-        lines.push(`- ${j.id} [${j.status}]${elapsed}${exitStr}${desc ? ` | ${desc}` : ""}`);
+        lines.push(`- ${j.id} [${j.status}]${elapsed}${exitStr}${lifecycleStr}${visibilityStr}${desc ? ` | ${desc}` : ""}`);
       }
       if (jobs.length > show.length) {
         lines.unshift(`(showing last ${show.length} of ${jobs.length} jobs)`);

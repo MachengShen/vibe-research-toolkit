@@ -47,7 +47,15 @@ When the task is an ML experiment, the action block should enforce the run contr
 2. Launch the command through `scripts/vr_run.sh`:
    - `scripts/vr_run.sh --run-id <run_id> --run-dir <run_dir> -- <train/eval command>`
 3. Ensure `metrics.json` is generated and validated.
-4. Set `watch.thenTask` to run post-run automation steps:
+4. Set `watch.requireFiles` to:
+   - `<run_dir>/metrics.json`
+   - `<run_dir>/meta.json`
+   - `<run_dir>/train.log`
+5. Set `watch.readyTimeoutSec` (for example `900`) and `watch.onMissing="block"` unless explicitly instructed otherwise.
+6. Add `preflight` checks on `job_start`:
+   - `{"type":"path_exists","path":"scripts/vr_run.sh"}`
+   - optional config/script existence checks relevant to the run
+7. Set `watch.thenTask` to run post-run automation steps:
    - `python3 tools/exp/validate_metrics.py <run_dir>/metrics.json`
    - `python3 tools/exp/append_registry.py --registry exp/registry.jsonl --run-dir <run_dir>`
    - `python3 tools/exp/summarize_run.py --run-dir <run_dir> --out-md reports/rolling_report.md --append`

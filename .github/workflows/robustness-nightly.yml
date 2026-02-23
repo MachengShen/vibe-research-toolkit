@@ -1,0 +1,43 @@
+name: Robustness Nightly
+
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  robustness-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run robustness execution suite
+        run: bash scripts/robustness_exec_suite.sh
+
+      - name: Upload robustness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robustness-suite-${{ github.run_id }}
+          path: reports/robustness_suite
+          if-no-files-found: warn

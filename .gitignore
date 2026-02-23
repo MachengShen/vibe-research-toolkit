@@ -10,6 +10,7 @@ config/*.env
 *.log
 .tmp
 .DS_Store
+reports/
 
 # Node
 node_modules/

@@ -161,7 +161,20 @@ Run local lint:
 bash scripts/lint_repo.sh
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same lint on every push and pull request.
+Run the required execution gate (PR-equivalent):
+
+```bash
+bash scripts/essential_exec_check.sh
+```
+
+Run the extended robustness suite:
+
+```bash
+bash scripts/robustness_exec_suite.sh
+```
+
+CI (`.github/workflows/ci.yml`) runs lint + the required execution gate on every push and pull request.
+Nightly/manual robustness runs are defined in `.github/workflows/robustness-nightly.yml`.
 
 Lint enforces publishability invariants:
 - Bash headers and strict mode (`#!/usr/bin/env bash`, `set -euo pipefail`)

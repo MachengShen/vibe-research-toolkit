@@ -215,3 +215,38 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 1. Add PR template/checklist integration so reviewers must attach execution evidence.
 2. Add machine-readable summary schema checker (`tools/verification/check_summary.py`) and enforce in CI.
 3. Run one Discord runtime canary session (wait-loop guard + visibility + restart recovery) and link logs.
+
+## 2026-02-23T14:00:57+0800
+### Objective
+- Finish full implementation of GBDPro execution-check proposal by completing post-MVP Tasks 5-8.
+
+### Changes
+- Added reviewer integration artifacts:
+  - `.github/pull_request_template.md`
+  - `docs/verification/PR_REVIEW_CHECKLIST.md`
+- Added summary schema validator:
+  - `tools/verification/check_summary.py`
+- Updated execution scripts:
+  - `scripts/essential_exec_check.sh` and `scripts/robustness_exec_suite.sh` now include per-test evidence paths, timestamp logging, and summary-schema validation.
+  - robustness suite auto-generates D-section final summary requirements.
+- Updated workflow enforcement:
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/robustness-nightly.yml`
+- Updated docs:
+  - `CONTRIBUTING.md`
+  - `README.md`
+  - `docs/runbooks/ROBUSTNESS_EXEC_SUITE.md`
+  - `docs/verification/EXECUTION_CHECK_CONTRACT.md`
+
+### Latest commit
+- `fb901f1` — `ci: complete execution-check gate with reviewer template and summary validation`
+- Significance: closes remaining proposal gaps (reviewer checklist UX + machine-readable quality gate + rollout/DoD contract), so the execution-check design is now fully implemented in code/docs/workflows.
+
+### Verification
+- `bash scripts/lint_repo.sh` (pass)
+- `bash scripts/essential_exec_check.sh` (pass)
+- `bash scripts/robustness_exec_suite.sh` (pass)
+
+### Next steps
+1. Run one Discord/manual Tier-3 canary (T7/T8/T9) and attach evidence paths to a PR.
+2. Make `essential-exec` a required branch protection check if not already enforced in GitHub settings.

@@ -1041,3 +1041,43 @@
 
 ### Training status
 - Inactive (epoch/metrics N/A)
+
+## 2026-02-23T14:00:48+0800
+### Scope
+- Complete the remaining GBDPro execution-check proposal items beyond MVP Tasks 1-4 (reviewer UX + machine-readable gate hardening + rollout/DoD documentation).
+
+### Actions
+- Added PR reviewer UX assets:
+  - `.github/pull_request_template.md`
+  - `docs/verification/PR_REVIEW_CHECKLIST.md`
+  - updated `CONTRIBUTING.md` with mandatory execution evidence and manual runtime-check expectations.
+- Added machine-readable summary quality gate:
+  - `tools/verification/check_summary.py` (schema + consistency validation, top failing/warning checks output).
+  - wired into `scripts/essential_exec_check.sh` and `scripts/robustness_exec_suite.sh`.
+  - both suite summaries now carry per-test `evidence_path`.
+- Strengthened suite logs and final-report format:
+  - per-test `started_at`/`ended_at` timestamps in both scripts.
+  - robustness suite now auto-appends D-section summary (overall, failed tests, top 3 fixes, report-vs-reality note).
+- CI/workflow enforcement updates:
+  - `.github/workflows/ci.yml` now validates essential summary schema after gate run.
+  - `.github/workflows/robustness-nightly.yml` now validates robustness summary schema.
+- Documentation updates:
+  - `README.md`
+  - `docs/runbooks/ROBUSTNESS_EXEC_SUITE.md`
+  - `docs/verification/EXECUTION_CHECK_CONTRACT.md` (adds rollout phases + Definition of Done).
+
+### Verification
+- `bash scripts/lint_repo.sh` (pass)
+- `bash scripts/essential_exec_check.sh` (pass)
+  - report: `reports/essential_exec/20260223-135934`
+- `bash scripts/robustness_exec_suite.sh` (pass)
+  - report: `reports/robustness_suite/2026-02-23`
+
+### Commit
+- `fb901f1` — `ci: complete execution-check gate with reviewer template and summary validation`
+
+### Runtime note
+- No relay restart performed in this task.
+
+### Training status
+- Inactive (epoch/metrics N/A)

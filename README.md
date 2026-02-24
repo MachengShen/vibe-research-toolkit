@@ -10,7 +10,7 @@ This repository combines:
 
 ## Stable Release
 
-- Current stable release: `v1.0.1`
+- Current stable release: `v1.1.0`
 - Release metadata:
   - `VERSION`
   - `CHANGELOG.md`

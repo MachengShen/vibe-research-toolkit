@@ -2,7 +2,7 @@
 
 This manual is for researchers running experiments through the Discord relay + agent stack in this repo.
 
-Stable reference release: `v1.0.1`.
+Stable reference release: `v1.1.0`.
 
 ## 1) What you get
 

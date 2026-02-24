@@ -68,7 +68,7 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ## Current publication state
 - Canonical remote: `https://github.com/MachengShen/vibe-research-toolkit.git`
 - Visibility: public
-- Latest release: `v1.0.1`
+- Latest release: `v1.1.0`
 - PR merged: `https://github.com/MachengShen/vibe-research-toolkit/pull/3`
 
 ## Open priorities

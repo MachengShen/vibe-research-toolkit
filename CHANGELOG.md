@@ -23,6 +23,16 @@ All notable changes to `vibe-research-toolkit` are documented in this file.
 - `scripts/lint_repo.sh` now requires packaged skill frontmatter to include `version`.
 - Packaged skills now include explicit `version` in YAML frontmatter.
 
+## [1.1.0] - 2026-02-24
+
+### Added
+- Relay Phase 1 supervisor flow for `job_start` with feature-gated schema validation and finalize-time state checks.
+- Bundled portable stage0 supervisor runner at `codex-discord-relay/scripts/stage0_smoke_gate.py` to remove runtime dependency on external repo layout.
+
+### Changed
+- Relay docs/env examples updated for `RELAY_SUPERVISOR_PHASE1_*` and `RELAY_MAX_JOB_COMMAND_CHARS`.
+- Release metadata and manuals updated to track `v1.1.0`.
+
 ## [1.0.0] - 2026-02-22
 
 ### Added

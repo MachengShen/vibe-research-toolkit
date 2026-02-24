@@ -1375,3 +1375,57 @@
 - `/root/VibeResearch_toolkit/codex-discord-relay/scripts/stage0_smoke_gate.py`
 - `/root/codex-discord-relay/relay.js`
 - `/root/codex-discord-relay/scripts/stage0_smoke_gate.py`
+## ${ts}
+### Objective
+- Clear release blocker evidence and ship toolkit version bump to `1.1.0` only after fresh execution-gate verification.
+
+### Changes
+- Investigated user-reported `A1.lint` failure context from `scripts/essential_exec_check.sh` and re-ran local gates.
+- Confirmed current branch passes required checks; `A1.lint` is green.
+- Bumped release metadata to `1.1.0`:
+  - `VERSION`
+  - `codex-discord-relay/package.json`
+  - `codex-discord-relay/package-lock.json`
+  - `README.md`
+  - `docs/USER_MANUAL.md`
+  - `docs/WORKING_MEMORY.md`
+  - `CHANGELOG.md`
+- Created commit:
+  - `e93d3f3` release: bump toolkit to v1.1.0
+
+### Verification
+- `bash scripts/lint_repo.sh` -> pass
+- `bash scripts/essential_exec_check.sh` -> pass (`required_failed=0`, `warnings=1`)
+- Non-required warning only: `A2.relay.help` (missing local `node_modules` help-path skip behavior)
+
+### Evidence
+- `reports/essential_exec/release_1_1_0_20260224-201801/suite_log.md`
+- `reports/essential_exec/release_1_1_0_20260224-201801/summary.json`
+- `/root/VibeResearch_toolkit/codex-discord-relay/package.json`
+- `/root/VibeResearch_toolkit/VERSION`
+
+### Exact command(s) run
+- `bash scripts/lint_repo.sh`
+- `ESSENTIAL_EXEC_REPORT_DIR=reports/essential_exec/release_1_1_0_... bash scripts/essential_exec_check.sh`
+- `npm --prefix codex-discord-relay version 1.1.0 --no-git-tag-version`
+- `git commit -m "release: bump toolkit to v1.1.0"`
+
+### Next steps
+- Tag/push `v1.1.0` once memory-log commit is recorded.
+## 2026-02-24T20:19:11+08:00
+### Correction
+- The immediately previous entry header used literal `${ts}` due quoted-heredoc variable non-expansion.
+- This timestamped entry is authoritative for the release-bump record.
+
+### Mistake
+- Appended `HANDOFF_LOG.md` with a literal timestamp placeholder (`## ${ts}`) instead of a concrete timestamp.
+
+### Cause
+- Used `cat <<'EOF'` with an interpolated variable in the markdown body.
+
+### Guardrail
+- When appending logs with quoted heredocs, print dynamic fields (timestamp/run ids) via `printf` before the heredoc body; never place shell vars inside `<<'EOF'` content.
+
+### Evidence
+- `/root/VibeResearch_toolkit/HANDOFF_LOG.md`
+- command: `cat <<'EOF' >> HANDOFF_LOG.md` with `## ${ts}` body line

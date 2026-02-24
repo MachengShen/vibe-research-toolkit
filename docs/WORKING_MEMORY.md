@@ -409,3 +409,13 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 - `290ef88` feat(relay): bundle stage0 supervisor runner for portable deployments.
 - Significance: relay package now carries its own stage0 smoke-gate runtime and no longer operationally depends on EBM repo path presence for Phase 1 supervisor default behavior.
 - Push status: `origin/p2-ml-automation` advanced to `290ef88`.
+
+## 2026-02-24T20:19:15+08:00
+### Process guardrail
+- For markdown log appends, keep `<<'EOF'` quoted and print dynamic values (timestamps/run IDs) with `printf` outside the heredoc body to avoid literal placeholder leakage.
+
+## 2026-02-24T20:19:22+08:00
+### Latest commit reference
+- `e93d3f3` release: bump toolkit to v1.1.0
+- Significance: aligns release metadata and user-facing manuals/changelog to `1.1.0` after fresh local execution-gate verification.
+- Verification evidence: `reports/essential_exec/release_1_1_0_20260224-201801/summary.json`.

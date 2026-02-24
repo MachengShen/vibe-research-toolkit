@@ -1332,3 +1332,11 @@
 - `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
 - `/root/VibeResearch_toolkit/system/codex-discord-relay-multictl`
 - `/root/VibeResearch_toolkit/scripts/profile_relay_runs.py`
+
+## 2026-02-24T16:26:47+08:00
+### Objective
+- Remove implicit dependency on `/root/ebm-online-rl-prototype` for Phase 1 supervisor usage by bundling `stage0_smoke_gate.py` into relay and making default resolution portable.
+
+### Initial context
+- Current Phase 1 default script is configured as `scripts/stage0_smoke_gate.py`, while the script currently exists only in EBM repo.
+- User requested portability so toolkit package can be deployed without requiring EBM repo layout.

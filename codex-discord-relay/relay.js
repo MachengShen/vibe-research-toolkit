@@ -2,10 +2,13 @@
 "use strict";
 
 const fsp = require("node:fs/promises");
+const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const readline = require("node:readline");
+
+const BUNDLED_STAGE0_SUPERVISOR_SCRIPT = path.join(__dirname, "scripts", "stage0_smoke_gate.py");
 
 function resolveDiscordProxyUrl() {
   // Prefer explicit Discord proxy env, then fall back to conventional proxy env vars.
@@ -438,8 +441,8 @@ const CONFIG = {
   watchRequireFilesDefaultPollSec: Math.max(1, intEnv("RELAY_WATCH_REQUIRE_FILES_DEFAULT_POLL_SEC", 15)),
   supervisorPhase1Enabled: boolEnv("RELAY_SUPERVISOR_PHASE1_ENABLED", false),
   supervisorPhase1DefaultScript:
-    String(process.env.RELAY_SUPERVISOR_PHASE1_DEFAULT_SCRIPT || "scripts/stage0_smoke_gate.py").trim() ||
-    "scripts/stage0_smoke_gate.py",
+    String(process.env.RELAY_SUPERVISOR_PHASE1_DEFAULT_SCRIPT || BUNDLED_STAGE0_SUPERVISOR_SCRIPT).trim() ||
+    BUNDLED_STAGE0_SUPERVISOR_SCRIPT,
   supervisorPhase1DefaultExpectStatus: parseSupervisorExpectedStatus(
     process.env.RELAY_SUPERVISOR_PHASE1_DEFAULT_EXPECT_STATUS || "success"
   ),
@@ -4444,13 +4447,28 @@ function buildStage0SupervisorLaunchSpec(supervisor, { workdir } = {}) {
   const baseWorkdir = path.resolve(workdir || CONFIG.defaultWorkdir);
   const projectRoot = resolvePathFromBase(supervisor.projectRoot || baseWorkdir, baseWorkdir) || baseWorkdir;
   const cwd = resolvePathFromBase(supervisor.cwd || projectRoot, baseWorkdir) || projectRoot;
-  const scriptPath = resolvePathFromBase(
-    supervisor.scriptPath || CONFIG.supervisorPhase1DefaultScript || "scripts/stage0_smoke_gate.py",
-    cwd
-  );
+  const configuredScriptRaw = String(
+    supervisor.scriptPath || CONFIG.supervisorPhase1DefaultScript || BUNDLED_STAGE0_SUPERVISOR_SCRIPT
+  ).trim();
+  let scriptPath = resolvePathFromBase(configuredScriptRaw, cwd);
+  // Keep relative env defaults portable: if not found under target cwd, try relay-bundled path.
+  if (
+    !supervisor.scriptPath &&
+    configuredScriptRaw &&
+    !path.isAbsolute(configuredScriptRaw) &&
+    (!scriptPath || !fs.existsSync(scriptPath))
+  ) {
+    const relayBundledCandidate = resolvePathFromBase(configuredScriptRaw, __dirname);
+    if (relayBundledCandidate && fs.existsSync(relayBundledCandidate)) {
+      scriptPath = relayBundledCandidate;
+    }
+  }
   const stateFile = resolvePathFromBase(supervisor.stateFile, cwd);
   if (!scriptPath || !stateFile) {
     return { ok: false, error: "supervisor requires scriptPath and stateFile", command: "", watchPatch: null };
+  }
+  if (!fs.existsSync(scriptPath)) {
+    return { ok: false, error: `supervisor script not found: ${scriptPath}`, command: "", watchPatch: null };
   }
 
   const runId = String(supervisor.runId || "").trim();

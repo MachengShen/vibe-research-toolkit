@@ -182,7 +182,7 @@ Notes:
     - optional `smokeRequiredFiles[]`, `fullRequiredFiles[]`, `smokeRunDir`
     - optional `cleanupSmokePolicy=keep_all|keep_manifest_only` (default `keep_manifest_only`)
     - optional `gateOut`, `gateErr`, `readyTimeoutSec`, `readyPollSec`, `onMissing`
-  - when enabled, relay compiles and launches `scripts/stage0_smoke_gate.py`, auto-wires watch artifact gates, and validates state status/cleanup contract before callback enqueue.
+  - when enabled, relay compiles and launches the bundled stage0 runner (default under relay `scripts/`) unless overridden via `supervisor.scriptPath`; relay auto-wires watch artifact gates and validates state status/cleanup contract before callback enqueue.
 - Wait-pattern guard can warn/reject risky `pgrep -f` self-match loops before launch.
 - Visibility gate can mark long jobs as degraded if startup/periodic heartbeats are missing.
 
@@ -210,7 +210,7 @@ Env knobs:
 - `RELAY_WATCH_REQUIRE_FILES_DEFAULT_TIMEOUT_SEC=<int>` (default `900`)
 - `RELAY_WATCH_REQUIRE_FILES_DEFAULT_POLL_SEC=<int>` (default `15`)
 - `RELAY_SUPERVISOR_PHASE1_ENABLED=true|false` (default `false`)
-- `RELAY_SUPERVISOR_PHASE1_DEFAULT_SCRIPT=<path>` (default `scripts/stage0_smoke_gate.py`)
+- `RELAY_SUPERVISOR_PHASE1_DEFAULT_SCRIPT=<path>` (default bundled runner in relay `scripts/`; relative values are resolved against supervisor cwd, then relay dir fallback)
 - `RELAY_SUPERVISOR_PHASE1_DEFAULT_EXPECT_STATUS=<status>` (default `success`)
 - `RELAY_SUPERVISOR_PHASE1_DEFAULT_READY_TIMEOUT_SEC=<int>` (default `900`)
 - `RELAY_SUPERVISOR_PHASE1_DEFAULT_READY_POLL_SEC=<int>` (default `15`)

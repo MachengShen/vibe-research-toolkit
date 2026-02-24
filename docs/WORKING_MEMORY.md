@@ -398,3 +398,8 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 - `08c9f28` feat(relay): integrate phase1 supervisor flow and sync toolkit runtime assets.
 - Significance: remote toolkit branch now contains the current Phase 1 supervisor integration snapshot and associated runtime/docs/skills packaging updates.
 - Push status: `origin/p2-ml-automation` advanced to `08c9f28`.
+
+## 2026-02-24T16:26:47+08:00
+### Scope
+- Portability hardening for relay Phase 1 supervisor.
+- Planned change: vendor `stage0_smoke_gate.py` into relay repo and make script-path resolution prefer bundled runner when project-local path is absent.

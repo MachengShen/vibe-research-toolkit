@@ -392,3 +392,9 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Scope
 - Investigating why relay validation touched `/root/ebm-online-rl-prototype` and preparing a toolkit remote push.
 - Current plan: verify relay/runtime files, commit coherent toolkit snapshot, push to `origin/p2-ml-automation`, then report stability status.
+
+## 2026-02-24T15:50:45+08:00
+### Latest commit reference
+- `08c9f28` feat(relay): integrate phase1 supervisor flow and sync toolkit runtime assets.
+- Significance: remote toolkit branch now contains the current Phase 1 supervisor integration snapshot and associated runtime/docs/skills packaging updates.
+- Push status: `origin/p2-ml-automation` advanced to `08c9f28`.

@@ -1312,3 +1312,23 @@
 ### Initial context
 - Runtime canary execution used `/root/ebm-online-rl-prototype` because `scripts/stage0_smoke_gate.py` currently lives there.
 - Toolkit repo (`/root/VibeResearch_toolkit`) has a large pending diff set across relay/docs/skills packaging and needs consolidation before push.
+
+## 2026-02-24T15:50:45+08:00
+### Scope
+- Pushed current toolkit snapshot to remote branch and recorded commit linkage.
+
+### Commit record
+- `08c9f28` feat(relay): integrate phase1 supervisor flow and sync toolkit runtime assets
+- scope: relay runtime/docs/env + toolkit memory/handoff updates + packaged skills/docs template assets.
+
+### Verification
+- syntax checks before push:
+  - `node --check codex-discord-relay/relay.js`
+  - `bash -n system/codex-discord-relay-multictl`
+  - `python3 -m py_compile scripts/profile_relay_runs.py`
+- push result: `origin/p2-ml-automation` updated `c219494 -> 08c9f28`.
+
+### Evidence paths
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/system/codex-discord-relay-multictl`
+- `/root/VibeResearch_toolkit/scripts/profile_relay_runs.py`

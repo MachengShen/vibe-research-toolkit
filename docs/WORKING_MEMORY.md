@@ -419,3 +419,10 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 - `e93d3f3` release: bump toolkit to v1.1.0
 - Significance: aligns release metadata and user-facing manuals/changelog to `1.1.0` after fresh local execution-gate verification.
 - Verification evidence: `reports/essential_exec/release_1_1_0_20260224-201801/summary.json`.
+
+## 2026-02-24T20:20:21+08:00
+### Release snapshot
+- Release status: `ready` after fresh execution-gate verification.
+- Latest release tag: `v1.1.0` (points to `e93d3f3`).
+- Branch head on remote: `origin/p2-ml-automation` at `8a93861`.
+- Verification artifact: `reports/essential_exec/release_1_1_0_20260224-201801/summary.json` (`overall=pass`, `required_failed=0`).

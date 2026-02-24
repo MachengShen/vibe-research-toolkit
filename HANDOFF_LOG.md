@@ -1429,3 +1429,38 @@
 ### Evidence
 - `/root/VibeResearch_toolkit/HANDOFF_LOG.md`
 - command: `cat <<'EOF' >> HANDOFF_LOG.md` with `## ${ts}` body line
+## 2026-02-24T20:20:16+08:00
+### Scope
+- Finalize `1.1.0` release prep after user-reported lint gate failure signal.
+
+### Release hardening status
+- `ready`
+- Required execution checks pass on current head.
+- No release blockers remain.
+
+### Verification
+- `bash scripts/lint_repo.sh` -> pass
+- `ESSENTIAL_EXEC_REPORT_DIR=reports/essential_exec/release_1_1_0_20260224-201801 bash scripts/essential_exec_check.sh` -> pass
+  - summary: `overall=pass required_failed=0 warnings=1`
+  - non-required warning: `A2.relay.help`
+
+### Versioning + remote state
+- Release commit: `e93d3f3` (`release: bump toolkit to v1.1.0`)
+- Metadata commit: `8a93861` (`docs: log v1.1.0 verification and handoff guardrail`)
+- Branch pushed: `origin/p2-ml-automation` -> `8a93861`
+- Tag created/pushed: `v1.1.0` -> `e93d3f3`
+
+### Evidence
+- `/root/VibeResearch_toolkit/reports/essential_exec/release_1_1_0_20260224-201801/summary.json`
+- `/root/VibeResearch_toolkit/reports/essential_exec/release_1_1_0_20260224-201801/suite_log.md`
+- `/root/VibeResearch_toolkit/VERSION`
+- `/root/VibeResearch_toolkit/codex-discord-relay/package.json`
+
+### Exact command(s) run
+- `bash scripts/lint_repo.sh`
+- `ESSENTIAL_EXEC_REPORT_DIR=reports/essential_exec/release_1_1_0_20260224-201801 bash scripts/essential_exec_check.sh`
+- `git tag -a v1.1.0 e93d3f3 -m "v1.1.0"`
+- `git push origin p2-ml-automation && git push origin v1.1.0`
+
+### Next steps
+- Optional: publish GitHub Release notes from tag `v1.1.0`.

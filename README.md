@@ -124,13 +124,27 @@ Then DM your relay bot in Discord and run `/status`.
 5. Inspect results and update memory:
    - `/handoff --commit` (optional)
 
+## Mandatory Skill Map (Workflow)
+
+For relay + ML workflow changes, use this minimum skill mapping:
+
+- New capability/change request: `requirements-intake-for-ml-research`
+- Long-running experiment launch: `relay-long-task-callback` + `ml-run-contract-enforcer`
+- PR validation/evidence writing: `pr-acceptance-tests-writer`
+- Runtime robustness verification: `robustness-execution-suite-runner`
+- Overnight failure triage: `incident-triage-playbook`
+- Pre-release hardening: `release-hardening-checklist`
+- Session continuity updates: `experiment-working-memory-handoff`
+
+Rule of thumb: do not keep foreground `sleep + tail` monitor loops in normal turns; use callback jobs (`job_start + watch + thenTask`) and keep foreground turns short.
+
 ## Relay Callback Pattern (Why it matters)
 
 For long training/eval/sweep jobs, use relay actions so completion triggers analysis automatically.
 
 ```text
 [[relay-actions]]
-{"actions":[{"type":"job_start","description":"maze2d ablation seed=1","command":"bash scripts/run_ablation_seed1.sh","watch":{"everySec":120,"tailLines":80,"thenTask":"Analyze logs/maze2d_seed1.log and summarize final metrics, failures, and next experiment.","thenTaskDescription":"Analyze maze2d seed=1 results","runTasks":true}}]}
+{"actions":[{"type":"job_start","description":"maze2d ablation seed=1","command":"bash scripts/run_ablation_seed1.sh","watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze logs/maze2d_seed1.log and summarize final metrics, failures, and next experiment.","thenTaskDescription":"Analyze maze2d seed=1 results","runTasks":true}}]}
 [[/relay-actions]]
 ```
 

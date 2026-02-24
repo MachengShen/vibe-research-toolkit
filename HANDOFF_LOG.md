@@ -1081,3 +1081,234 @@
 
 ### Training status
 - Inactive (epoch/metrics N/A)
+
+## 2026-02-23T17:16:34+0800
+### Scope
+- Sync toolkit with new relay monitoring optimization defaults and collaboration-skill packaging/docs requirements.
+
+### Actions
+- Synced relay runtime/docs/env from live runtime to toolkit:
+  - 
+  - 
+  - 
+- Updated callback skill defaults in packaged skill:
+  - 
+- Mirrored newly created collaboration skills into packaged distribution:
+  - 
+  - 
+  - 
+  - 
+  - 
+  - 
+- Updated packaged manifest:
+  - 
+- Added mandatory skill map in workflow docs:
+  - 
+  - 
+
+### Verification
+- [lint] node --check codex-discord-relay/relay.js
+[lint] bash -n bootstrap.sh
+[lint] bash -n bootstrap.sh
+[lint] bash -n codex-discord-relay/scripts/vpn_hypothesis_probe.sh
+[lint] bash -n packaged-skills/codex/codex-discord-relay-stuck-check/scripts/stuck_check.sh
+[lint] bash -n packaged-skills/codex/periodic-mechanistic-service/scripts/install_periodic_systemd_timer.sh
+[lint] bash -n scripts/apply_local_state.sh
+[lint] bash -n scripts/common.sh
+[lint] bash -n scripts/configure_openclaw_discord.sh
+[lint] bash -n scripts/essential_exec_check.sh
+[lint] bash -n scripts/export_local_state.sh
+[lint] bash -n scripts/gpu_gate.sh
+[lint] bash -n scripts/healthcheck.sh
+[lint] bash -n scripts/init_repo_memory.sh
+[lint] bash -n scripts/install_codex_discord_relay.sh
+[lint] bash -n scripts/install_cron.sh
+[lint] bash -n scripts/install_local_state_sync_cron.sh
+[lint] bash -n scripts/install_openclaw.sh
+[lint] bash -n scripts/install_openclaw_gateway_watchdog.sh
+[lint] bash -n scripts/install_openclaw_kit_autoupdate.sh
+[lint] bash -n scripts/install_packaged_skills.sh
+[lint] bash -n scripts/lint_repo.sh
+[lint] bash -n scripts/robustness_exec_suite.sh
+[lint] bash -n scripts/setup_proxy_env.sh
+[lint] bash -n scripts/sync_local_skills_to_packaged.sh
+[lint] bash -n scripts/sync_local_state_to_repo.sh
+[lint] bash -n scripts/verify_install.sh
+[lint] bash -n scripts/vr_run.sh
+[lint] bash -n system/codex-discord-relay-ensure-multi.sh
+[lint] bash -n system/codex-discord-relay-ensure.sh
+[lint] bash -n system/openclaw-gateway-ensure.sh
+[lint] bash -n system/openclaw-kit-autoupdate.sh
+[lint] shellcheck not found; skipping shellcheck checks
+
+[lint] all checks passed (pass)
+- relay file parity checks passed vs live runtime copy.
+- packaged skill directories present for all six newly mirrored skills.
+
+### Runtime note
+- Live default relay was restarted from  after env/runtime sync; toolkit copy remains source-aligned.
+
+### Evidence paths
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+
+### Training status
+- Inactive (epoch/metrics N/A)
+
+## 2026-02-23T17:38:05+0800
+### Mistake
+- One append entry used unquoted heredoc syntax, causing markdown backticks to expand.
+
+### Guardrail
+- Use single-quoted heredoc delimiters for all log/memory markdown appends.
+
+### Evidence paths
+- `/root/VibeResearch_toolkit/HANDOFF_LOG.md`
+- `/root/VibeResearch_toolkit/docs/WORKING_MEMORY.md`
+
+## 2026-02-23T22:15:59+0800
+### Objective
+- Add selective progress-message persistency for Discord relay threads: durable narrative notes, transient command traces.
+
+### Changes
+- Relay runtime:
+  - added `RELAY_PROGRESS_PERSISTENT_MODE=all|narrative|off`
+  - added `RELAY_PROGRESS_PERSISTENT_MIN_CHARS`
+  - added `RELAY_PROGRESS_PERSISTENT_MAX_CHARS`
+  - narrative mode now suppresses low-signal command/tool progress lines from durable progress posts.
+- Docs/env templates updated:
+  - `codex-discord-relay/README.md`
+  - `codex-discord-relay/.env.example`
+  - `config/setup.env.example`
+- Synced toolkit relay files to live runtime relay and applied runtime env values on server.
+
+### Verification
+- `node --check /root/VibeResearch_toolkit/codex-discord-relay/relay.js` (pass)
+- `node --check /root/codex-discord-relay/relay.js` (pass)
+- restart + status:
+  - `/usr/local/bin/codex-discord-relay-multictl restart all`
+  - `/usr/local/bin/codex-discord-relay-multictl status all` (default+claude running)
+
+### Evidence
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/codex-discord-relay/README.md`
+- `/root/VibeResearch_toolkit/codex-discord-relay/.env.example`
+- `/root/VibeResearch_toolkit/config/setup.env.example`
+- `/root/.codex-discord-relay.env`
+- `/root/.codex-discord-relay/instances.d/claude.env`
+
+## 2026-02-23T22:27:40+0800
+### Objective
+- Add `narrative+milestones` relay progress persistence mode.
+
+### Changes
+- `codex-discord-relay/relay.js`
+  - parse mode aliases for `narrative+milestones`
+  - added milestone summarizer and persistent-post classification
+  - milestone posts bypass interval throttle (dedupe + max-per-run still apply)
+- docs/examples:
+  - `codex-discord-relay/README.md`
+  - `codex-discord-relay/.env.example`
+  - `config/setup.env.example`
+
+### Verification
+- `node --check codex-discord-relay/relay.js` (pass)
+- live/toolkit parity confirmed for relay files.
+
+### Runtime rollout
+- live relay env set to `RELAY_PROGRESS_PERSISTENT_MODE=narrative+milestones` for both default and claude instances.
+
+## 2026-02-23T22:36:41+08:00
+### Objective
+- Mirror open-research contract/playbook canonical docs into toolkit workspace without changing runtime code/env.
+
+### Changes
+- Added:
+  - `docs/OPEN_RESEARCH_CONTRACT.md`
+  - `docs/CLAIM_LEDGER.md`
+  - `docs/NEGATIVE_RESULTS.md`
+  - `docs/templates/{WORKING_MEMORY,HANDOFF_LOG,CLAIM_LEDGER,NEGATIVE_RESULTS,HYPOTHESIS_CARD,PULL_REQUEST}_TEMPLATE.md`
+  - `docs/hypotheses/` directory
+
+### Exact command(s) run
+- `cp/install open_research_infra_docs assets -> /root/VibeResearch_toolkit/docs`
+
+### Evidence paths
+- `/root/VibeResearch_toolkit/docs/OPEN_RESEARCH_CONTRACT.md`
+- `/root/VibeResearch_toolkit/docs/CLAIM_LEDGER.md`
+- `/root/VibeResearch_toolkit/docs/NEGATIVE_RESULTS.md`
+- `/root/VibeResearch_toolkit/docs/templates/`
+
+### Current run state
+- Documentation-only update; no toolkit runtime restart required.
+
+## 2026-02-24T14:32:55+08:00
+### Objective
+- Implement Phase 1 relay-native supervisor integration in relay runtime with execution validation.
+
+### Changes
+- Added feature-gated `job_start.supervisor` contract parsing (`stage0_smoke_gate`) in `codex-discord-relay/relay.js`.
+- Added supervisor launch compiler (structured spec -> stage0 command) and watch patch auto-wiring.
+- Added finalize-time supervisor state validation (status + cleanup policy checks) before callback enqueue.
+- Added env/config knobs and docs:
+  - `RELAY_SUPERVISOR_PHASE1_*`
+  - `RELAY_MAX_JOB_COMMAND_CHARS`
+- Updated files:
+  - `codex-discord-relay/relay.js`
+  - `codex-discord-relay/README.md`
+  - `codex-discord-relay/.env.example`
+  - `config/setup.env.example`
+- Synced toolkit updates to live relay copy under `/root/codex-discord-relay/`.
+
+### Verification
+- `node --check` passed for toolkit/live `relay.js`.
+- Runtime canary passed using compiled stage0 supervisor command:
+  - `run_id=relay_phase1_canary_1771914624004`
+  - state `success`
+  - cleanup action `deleted_smoke_run_dir_kept_manifest`.
+- Runtime validator checks passed for expected success and mismatch cases.
+- Toolkit/live parity checks passed for relay runtime files.
+
+### Evidence
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/codex-discord-relay/README.md`
+- `/root/VibeResearch_toolkit/codex-discord-relay/.env.example`
+- `/root/VibeResearch_toolkit/config/setup.env.example`
+- `/root/codex-discord-relay/relay.js`
+- `/root/ebm-online-rl-prototype/tmp/relay_phase1_canary_1771914624004/state.json`
+
+### Next steps
+1. Enable `RELAY_SUPERVISOR_PHASE1_ENABLED=true` in live env.
+2. Perform drained safe restart.
+3. Canary one native `job_start.supervisor` action in-thread.
+
+## 2026-02-24T14:33:38+08:00
+### Scope
+- Activation check for Phase 1 runtime changes.
+
+### Verification
+- Safe restart attempt blocked by drain guard (`rc=4`) while active conversation is running.
+- Relay remains running (`pid=25917`).
+
+### Next steps
+1. Retry safe restart after conversation drains.
+2. Run native `job_start.supervisor` canary in Discord thread.
+
+## 2026-02-24T15:49:54+08:00
+### Objective
+- Clarify cross-repo scope for relay supervisor work, and push the current toolkit snapshot to remote.
+
+### Initial context
+- Runtime canary execution used `/root/ebm-online-rl-prototype` because `scripts/stage0_smoke_gate.py` currently lives there.
+- Toolkit repo (`/root/VibeResearch_toolkit`) has a large pending diff set across relay/docs/skills packaging and needs consolidation before push.

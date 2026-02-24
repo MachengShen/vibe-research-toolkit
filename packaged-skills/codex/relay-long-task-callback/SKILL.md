@@ -27,7 +27,7 @@ If required information is missing, do not guess critical paths or commands. Ret
 
 ```text
 [[relay-actions]]
-{"actions":[{"type":"job_start","command":"<non-interactive shell command>","watch":{"everySec":120,"tailLines":80,"thenTask":"Analyze final log and summarize metrics, failures, and next actions.","runTasks":true}}]}
+{"actions":[{"type":"job_start","command":"<non-interactive shell command>","watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze final log and summarize metrics, failures, and next actions.","runTasks":true}}]}
 [[/relay-actions]]
 ```
 
@@ -37,6 +37,7 @@ If required information is missing, do not guess critical paths or commands. Ret
 - Prefer launching a wrapper script, then start it with `bash /tmp/<name>.sh` or a repo-local script path.
 - Ensure the command writes logs deterministically so follow-up analysis can inspect them.
 - In `thenTask`, include exact log paths, run ids, and metrics to extract.
+- Do not use foreground polling loops (`sleep` + `tail`) in normal turns; use watcher callbacks.
 - Keep surrounding prose short to avoid drowning the action block.
 
 ## Research Run Profile (ML training/eval)
@@ -73,7 +74,7 @@ Validate <run_dir>/metrics.json, append the run to exp/registry.jsonl, append a 
 ```text
 Use skill relay-long-task-callback.
 Launch training in background and output exactly one [[relay-actions]] JSON block using job_start.
-Set watch.everySec=120 and tailLines=80.
+Set watch.everySec=300 and tailLines=30.
 Set thenTask="Analyze the final training log at <LOG_PATH>, report key metrics/trends/failures, and propose next steps.".
 Set runTasks=true.
 End with [[task:done]].

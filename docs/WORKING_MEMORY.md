@@ -250,3 +250,145 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Next steps
 1. Run one Discord/manual Tier-3 canary (T7/T8/T9) and attach evidence paths to a PR.
 2. Make `essential-exec` a required branch protection check if not already enforced in GitHub settings.
+
+## 2026-02-23T17:16:34+0800
+### Objective
+- Apply requested relay monitoring optimizations with distribution/docs parity for future toolkit users.
+
+### Changes
+- Updated relay runtime behavior and defaults for callback-first long-run monitoring:
+  - long-task watcher defaults tuned to , reduced tail volume.
+  - stale-progress guard added (unchanged log + low utilization window).
+- Synced live/toolkit relay runtime docs/env files.
+- Added six packaged collaboration skills and updated packaged skills manifest.
+- Added mandatory skill map guidance to toolkit workflow docs.
+
+### Verification
+-  (pass)
+- live/toolkit relay parity checks passed (, , ).
+
+### Evidence
+- /root/VibeResearch_toolkit/codex-discord-relay/relay.js
+- /root/VibeResearch_toolkit/codex-discord-relay/README.md
+- /root/VibeResearch_toolkit/codex-discord-relay/.env.example
+- /root/VibeResearch_toolkit/packaged-skills/skills.manifest
+- /root/VibeResearch_toolkit/README.md
+- /root/VibeResearch_toolkit/AGENTS.md
+
+### Next steps
+1. Run one canary long-run in Discord and confirm watcher cadence/noise reduction and stale-guard alert semantics.
+2. If stable, roll the same env defaults across any additional relay instances.
+
+## 2026-02-23T17:38:05+0800
+### Objective
+- Capture append-format guardrail after command-substitution noise in a prior handoff write.
+
+### Changes
+- Added guardrail: all memory markdown appends must use `<<'EOF'` quoted heredocs.
+
+### Evidence
+- /root/VibeResearch_toolkit/HANDOFF_LOG.md
+- /root/VibeResearch_toolkit/docs/WORKING_MEMORY.md
+
+### Next steps
+- Reuse quoted-heredoc append snippets for future automation notes.
+
+## 2026-02-23T22:16:05+0800
+### Objective
+- Support selective progress persistency in Discord: durable narrative updates while command-level traces remain transient.
+
+### Current state
+- Relay now supports `RELAY_PROGRESS_PERSISTENT_MODE` with `narrative` filtering.
+- New knobs available for persistent-progress text bounds:
+  - `RELAY_PROGRESS_PERSISTENT_MIN_CHARS`
+  - `RELAY_PROGRESS_PERSISTENT_MAX_CHARS`
+- Runtime env on this server is set to `narrative` mode for both default and claude relay instances.
+
+### Files updated
+- `codex-discord-relay/relay.js`
+- `codex-discord-relay/README.md`
+- `codex-discord-relay/.env.example`
+- `config/setup.env.example`
+
+### Next step
+1. Run one Discord canary in a thread and confirm durable progress posts retain high-signal notes while command/tool traces stay transient in the edited Running message.
+
+## 2026-02-23T22:27:47+0800
+### Objective
+- Improve Discord UX with durable narrative progress + explicit milestones, while keeping command traces transient.
+
+### Current state
+- New mode: `RELAY_PROGRESS_PERSISTENT_MODE=narrative+milestones`.
+- Durable updates now include checkpoint summaries such as:
+  - `Milestone: request queued`
+  - `Milestone: run started`
+  - `Milestone: context loaded`
+  - `Milestone: ready to summarize`
+- Command/tool trace lines remain in transient edited `Running ...` status only.
+
+### Updated files
+- `codex-discord-relay/relay.js`
+- `codex-discord-relay/README.md`
+- `codex-discord-relay/.env.example`
+- `config/setup.env.example`
+
+## 2026-02-23T22:36:41+08:00
+### Objective
+- Align toolkit docs with open-research contract/playbook baseline.
+
+### Changes
+- Added toolkit-local contract and canonical governance artifacts:
+  - `docs/OPEN_RESEARCH_CONTRACT.md`
+  - `docs/CLAIM_LEDGER.md`
+  - `docs/NEGATIVE_RESULTS.md`
+  - `docs/templates/*`
+
+### Evidence
+- `/root/VibeResearch_toolkit/docs/OPEN_RESEARCH_CONTRACT.md`
+- `/root/VibeResearch_toolkit/docs/CLAIM_LEDGER.md`
+- `/root/VibeResearch_toolkit/docs/NEGATIVE_RESULTS.md`
+- `/root/VibeResearch_toolkit/docs/templates/`
+
+### Next step
+- Optional follow-up: wire these files into runtime env (`RELAY_CONTEXT_FILE`, `RELAY_HANDOFF_FILES`) during a drained restart window.
+
+## 2026-02-24T14:32:55+08:00
+### Objective
+- Deliver Phase 1 relay-native supervisor path for smoke-gated long runs.
+
+### Current state
+- `job_start` now supports a feature-gated `supervisor` block (`stage0_smoke_gate`).
+- Relay compiles supervisor spec to command, auto-injects required watch files, and validates state/cleanup contract before callback enqueue.
+- New knobs are documented in toolkit env/docs:
+  - `RELAY_SUPERVISOR_PHASE1_ENABLED`
+  - `RELAY_SUPERVISOR_PHASE1_DEFAULT_*`
+  - `RELAY_MAX_JOB_COMMAND_CHARS`
+
+### Validation snapshot
+- Syntax checks passed on toolkit/live `relay.js`.
+- Runtime canary run `relay_phase1_canary_1771914624004` succeeded with expected cleanup behavior.
+- Supervisor validator mismatch path correctly reports `supervisor_state_status_mismatch`.
+
+### Evidence
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/codex-discord-relay/README.md`
+- `/root/VibeResearch_toolkit/codex-discord-relay/.env.example`
+- `/root/VibeResearch_toolkit/config/setup.env.example`
+- `/root/ebm-online-rl-prototype/tmp/relay_phase1_canary_1771914624004/state.json`
+
+### Next steps
+1. Turn on phase1 flag in live env and restart after drain.
+2. Run one Discord-thread canary via native supervisor action path.
+
+## 2026-02-24T14:33:38+08:00
+### Activation status
+- Runtime restart to load Phase 1 changes is pending; safe restart was blocked by active-run drain guard.
+- Relay process remains healthy/running.
+
+### Next step
+- Retry safe restart post-drain and execute native supervisor canary action.
+
+## 2026-02-24T15:49:54+08:00
+### Scope
+- Investigating why relay validation touched `/root/ebm-online-rl-prototype` and preparing a toolkit remote push.
+- Current plan: verify relay/runtime files, commit coherent toolkit snapshot, push to `origin/p2-ml-automation`, then report stability status.

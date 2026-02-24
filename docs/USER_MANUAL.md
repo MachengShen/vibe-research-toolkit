@@ -145,6 +145,28 @@ Registry behavior:
 - `exp/registry.jsonl` is append-only.
 - duplicate `run_id` is rejected by default (fail-closed).
 
+## 6B) Supervisor-backed long runs (recommended in v1.1.0)
+
+For high-value long jobs, prefer the relay supervisor path so callback analysis only runs after explicit state/artifact checks.
+
+Operational prerequisites:
+- `RELAY_AGENT_ACTIONS_ENABLED=true`
+- `RELAY_SUPERVISOR_PHASE1_ENABLED=true`
+- relay restart completed (`codex-discord-relay-multictl restart default`)
+
+Minimal action example:
+
+```text
+[[relay-actions]]
+{"actions":[{"type":"job_start","description":"maze2d phase1 canary","command":"echo use-supervisor-contract","supervisor":{"mode":"stage0_smoke_gate","runId":"r_phase1_canary","stateFile":"exp/results/r_phase1_canary/state.json","smokeCmd":"python -c 'print(\"smoke\")'","fullCmd":"python train.py --config cfg.yaml","cleanupSmokePolicy":"keep_manifest_only"},"watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze final artifacts and summarize metrics.","runTasks":true}}]}
+[[/relay-actions]]
+```
+
+Best-practice rollout:
+1. Run one canary in a single thread after restart.
+2. Confirm `state.json` status and expected cleanup behavior.
+3. Expand to normal long-run workflows.
+
 ## 7) Features designed for ML researchers
 
 ### Your requested highlights

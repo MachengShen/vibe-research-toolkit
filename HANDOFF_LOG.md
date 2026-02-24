@@ -1486,3 +1486,25 @@
 
 ### Next steps
 - Optional: edit release notes body for a shorter human summary if needed.
+## 2026-02-24T20:38:29+08:00
+### Objective
+- Update user-facing documentation so the latest supervisor/portability design is explicit and operationally actionable.
+
+### Changes
+- Added top-level README section for the latest design feature (`v1.1.0`): relay-native supervisor contract, bundled portable stage0 runner, and rollout guidance.
+- Added user-manual section `6B` with supervisor-backed long-run best-practice usage and a minimal action example.
+- Added changelog note that operator-facing docs now cover supervisor best-practice and portability context.
+
+### Verification
+- `bash scripts/lint_repo.sh` -> pass.
+
+### Evidence
+- `/root/VibeResearch_toolkit/README.md`
+- `/root/VibeResearch_toolkit/docs/USER_MANUAL.md`
+- `/root/VibeResearch_toolkit/CHANGELOG.md`
+
+### Exact command(s) run
+- `bash scripts/lint_repo.sh`
+
+### Next steps
+- Commit and push the documentation update to `origin/p2-ml-automation`.

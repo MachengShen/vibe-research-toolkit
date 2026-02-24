@@ -433,3 +433,8 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
   - `https://github.com/MachengShen/vibe-research-toolkit/releases/tag/v1.1.0`
 - Release state: stable (`isDraft=false`, `isPrerelease=false`).
 - Tag: `v1.1.0` (release commit `e93d3f3`).
+
+## 2026-02-24T20:38:29+08:00
+### Documentation snapshot
+- README now highlights the latest architecture change (`v1.1.0` supervisor + portable stage0 runner).
+- User manual now includes an explicit supervisor-backed long-run usage path (`6B`) with rollout sequence.

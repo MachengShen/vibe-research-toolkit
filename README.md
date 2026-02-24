@@ -15,6 +15,12 @@ This repository combines:
   - `VERSION`
   - `CHANGELOG.md`
 
+## Latest Design Feature (v1.1.0)
+
+- **Relay-native supervisor contract**: long jobs can launch with `job_start.supervisor` so callback follow-ups are gated by explicit state/artifact checks instead of best-effort process exit handling.
+- **Portable stage0 runner**: default stage0 smoke-gate is now bundled at `codex-discord-relay/scripts/stage0_smoke_gate.py`, removing the old operational dependency on `/root/ebm-online-rl-prototype`.
+- **Safer rollout path**: enable with `RELAY_SUPERVISOR_PHASE1_ENABLED=true`, restart safely, run one in-thread canary, then expand to broader usage.
+
 ## Why This Is Built For ML Researchers
 
 Most agent tooling optimizes for one-shot automation. Research work is iterative, uncertain, and hypothesis-driven.

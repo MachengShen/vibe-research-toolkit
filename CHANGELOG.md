@@ -32,6 +32,7 @@ All notable changes to `vibe-research-toolkit` are documented in this file.
 ### Changed
 - Relay docs/env examples updated for `RELAY_SUPERVISOR_PHASE1_*` and `RELAY_MAX_JOB_COMMAND_CHARS`.
 - Release metadata and manuals updated to track `v1.1.0`.
+- Added operator-facing docs for supervisor best-practice usage and portability context.
 
 ## [1.0.0] - 2026-02-22
 

@@ -1464,3 +1464,25 @@
 
 ### Next steps
 - Optional: publish GitHub Release notes from tag `v1.1.0`.
+## 2026-02-24T20:33:03+08:00
+### Scope
+- Publish GitHub Release from existing `v1.1.0` tag.
+
+### Changes
+- Created GitHub release `v1.1.0` using generated notes.
+- Verified release state is public (not draft, not prerelease).
+
+### Verification
+- `gh release view v1.1.0 --json name,tagName,isDraft,isPrerelease,url,publishedAt,targetCommitish`
+- Result: `isDraft=false`, `isPrerelease=false`, `targetCommitish=main`.
+
+### Evidence
+- `https://github.com/MachengShen/vibe-research-toolkit/releases/tag/v1.1.0`
+- `/root/.config/gh/hosts.yml` (active auth context)
+
+### Exact command(s) run
+- `gh release create v1.1.0 --title "v1.1.0" --generate-notes`
+- `gh release view v1.1.0 --json name,tagName,isDraft,isPrerelease,url,publishedAt,targetCommitish`
+
+### Next steps
+- Optional: edit release notes body for a shorter human summary if needed.

@@ -426,3 +426,10 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 - Latest release tag: `v1.1.0` (points to `e93d3f3`).
 - Branch head on remote: `origin/p2-ml-automation` at `8a93861`.
 - Verification artifact: `reports/essential_exec/release_1_1_0_20260224-201801/summary.json` (`overall=pass`, `required_failed=0`).
+
+## 2026-02-24T20:33:03+08:00
+### Release snapshot
+- GitHub release `v1.1.0` is now published at:
+  - `https://github.com/MachengShen/vibe-research-toolkit/releases/tag/v1.1.0`
+- Release state: stable (`isDraft=false`, `isPrerelease=false`).
+- Tag: `v1.1.0` (release commit `e93d3f3`).

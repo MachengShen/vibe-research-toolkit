@@ -1340,3 +1340,38 @@
 ### Initial context
 - Current Phase 1 default script is configured as `scripts/stage0_smoke_gate.py`, while the script currently exists only in EBM repo.
 - User requested portability so toolkit package can be deployed without requiring EBM repo layout.
+
+## 2026-02-24T16:30:18+08:00
+### Scope
+- Removed implicit EBM path dependency for Phase 1 supervisor by bundling stage0 runner into relay repo and updating resolution logic.
+
+### Changes
+- Added bundled runner:
+  - `codex-discord-relay/scripts/stage0_smoke_gate.py`
+- Updated `codex-discord-relay/relay.js`:
+  - default supervisor script path now supports relay-bundled fallback
+  - script existence check before launch spec success
+- Updated docs/examples:
+  - `codex-discord-relay/README.md`
+  - `codex-discord-relay/.env.example`
+  - `config/setup.env.example`
+- Synced toolkit->live relay files.
+
+### Verification
+- `node --check` passed for toolkit/live `relay.js`.
+- `python3 -m py_compile` passed for toolkit/live bundled stage0 script.
+- Portability canary passed from `/tmp` using bundled relay script path (no EBM repo required):
+  - run dir `/tmp/relay-portable-supervisor-2EgfSo/run`
+  - `STATE_STATUS=success`
+  - `CLEANUP_ACTION=deleted_smoke_run_dir_kept_manifest`
+  - `GATE_ERR_BYTES=0`
+
+### Commit record
+- `290ef88` feat(relay): bundle stage0 supervisor runner for portable deployments
+- pushed: `origin/p2-ml-automation` (`c7de99b -> 290ef88`)
+
+### Evidence paths
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/codex-discord-relay/scripts/stage0_smoke_gate.py`
+- `/root/codex-discord-relay/relay.js`
+- `/root/codex-discord-relay/scripts/stage0_smoke_gate.py`

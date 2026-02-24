@@ -403,3 +403,9 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Scope
 - Portability hardening for relay Phase 1 supervisor.
 - Planned change: vendor `stage0_smoke_gate.py` into relay repo and make script-path resolution prefer bundled runner when project-local path is absent.
+
+## 2026-02-24T16:30:18+08:00
+### Latest commit reference
+- `290ef88` feat(relay): bundle stage0 supervisor runner for portable deployments.
+- Significance: relay package now carries its own stage0 smoke-gate runtime and no longer operationally depends on EBM repo path presence for Phase 1 supervisor default behavior.
+- Push status: `origin/p2-ml-automation` advanced to `290ef88`.

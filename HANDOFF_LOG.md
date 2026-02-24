@@ -1508,3 +1508,7 @@
 
 ### Next steps
 - Commit and push the documentation update to `origin/p2-ml-automation`.
+## 2026-02-24T20:38:43+08:00
+### Commit record
+- `13f99f7` docs: refresh README/manual for supervisor portability design
+- scope: `README.md`, `docs/USER_MANUAL.md`, `CHANGELOG.md`, plus project handoff/memory updates.

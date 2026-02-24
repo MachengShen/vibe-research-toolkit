@@ -438,3 +438,8 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Documentation snapshot
 - README now highlights the latest architecture change (`v1.1.0` supervisor + portable stage0 runner).
 - User manual now includes an explicit supervisor-backed long-run usage path (`6B`) with rollout sequence.
+
+## 2026-02-24T20:38:43+08:00
+### Latest commit reference
+- `13f99f7` docs: refresh README/manual for supervisor portability design.
+- Significance: user-facing docs now explicitly reflect the Phase 1 supervisor + bundled portability architecture and recommended rollout path.

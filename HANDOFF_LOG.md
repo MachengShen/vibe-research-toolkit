@@ -1571,3 +1571,7 @@
 
 ### Next steps
 - After drain-based restart succeeds, run one in-thread `/exp run` canary and verify end-to-end watcher + post-run artifact generation through live relay path.
+## 2026-02-25T15:45:44+08:00
+### Commit record
+- `b3c97c8` feat(exp): add /exp automation flow and enable guild default
+- scope: relay `/exp run|best|report`, exp post-run tooling (`classify_failure`, `post_run_pipeline`, `report_registry`), docs/skills updates, and default `RELAY_EXP_ALLOW_GUILDS=true`.

@@ -475,3 +475,7 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
   - registry append (`exp/registry.jsonl`)
   - report update (`reports/rolling_report.md` + optional `/exp report` output)
   - experience/reflection artifacts.
+## 2026-02-25T15:45:48+08:00
+### Latest commit reference
+- `b3c97c8` feat(exp): add /exp automation flow and enable guild default.
+- Significance: relay now supports first-class `/exp` orchestration with deterministic post-run learning artifacts, and guild-thread operators can use `/exp` without DM-only default blocking.

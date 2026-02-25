@@ -29,6 +29,7 @@ Direct Discord -> agent CLI relay so you can chat with Codex or Claude from Disc
   - `/auto ...`
   - `/go ...`
   - `/overnight ...`
+  - `/exp ...`
   - `/help`
 
 ## Setup
@@ -123,6 +124,10 @@ Restart safety guard:
 - Agent relay actions (jobs): when enabled, the agent can output a `[[relay-actions]]...[[/relay-actions]]` JSON block to ask the relay to start/watch/stop a long-running shell job. This is gated by `RELAY_AGENT_ACTIONS_*` (disabled by default; DM-only by default). Job logs are stored under `$RELAY_STATE_DIR/jobs/<conversationKey>/<jobId>/job.log`.
 - `/research ...` enables a guarded research control plane (disabled by default) with on-disk project state/events, a manager decision parser (`[[research-decision]]...[[/research-decision]]`), and fail-closed research-only action execution.
 - `/go ...` is a task macro: queue and run immediately. Long-run intents (train/sweep/ablation/eval/experiment keywords) auto-wrap into a `job_start` + watcher callback task, while non-long tasks keep the task + handoff-update behavior.
+- `/exp ...` is a first-class ML automation command family:
+  - `/exp run <template_id> ...` launches template-backed runs via `scripts/vr_run.sh` and chains deterministic post-run automation.
+  - `/exp best ...` selects the current best successful run from `exp/registry.jsonl`.
+  - `/exp report ...` writes a markdown run table from the registry.
 - `/ask ...` is a priority interrupt: it bypasses the queue, attempts to pause the active run, answers your question quickly, then resumes the paused run automatically.
 - `/inject ...` is a hard-preempt run-replacement interrupt: it invalidates queued not-yet-started requests in the same conversation, requests stop on the active run, then launches a new run with your injected instruction.
 - `/ask` now injects a relay-built run snapshot into the stateless priority prompt (recent progress lines, recent jobs, and latest run-log excerpt). For small logs it can include the full log body; for large logs it includes a capped head+tail excerpt.
@@ -200,6 +205,14 @@ Env knobs:
 - `RELAY_JOBS_AUTO_WATCH=true|false` (default `true` only if actions enabled)
 - `RELAY_JOBS_AUTO_WATCH_EVERY_SEC=<int>` (default `300`)
 - `RELAY_JOBS_AUTO_WATCH_TAIL_LINES=<int>` (default `50`)
+- `RELAY_EXP_COMMANDS_ENABLED=true|false` (default `true`)
+- `RELAY_EXP_ALLOW_GUILDS=true|false` (default `true`)
+- `RELAY_EXP_DEFAULT_READY_TIMEOUT_SEC=<int>` (default `900`)
+- `RELAY_EXP_DEFAULT_READY_POLL_SEC=<int>` (default `15`)
+- `RELAY_EXP_EXPERIENCE_LOGGING_ENABLED=true|false` (default `true`)
+- `RELAY_EXP_WATCH_SNAPSHOTS_ENABLED=true|false` (default `false`)
+- `RELAY_EXP_WATCH_SNAPSHOT_EVERY_SEC=<int>` (default `300`)
+- `RELAY_EXP_WATCH_SNAPSHOT_TAIL_LINES=<int>` (default `80`)
 - `RELAY_JOBS_WATCH_COMPACT=true|false` (default `true`)
 - `RELAY_JOBS_WATCH_POST_NO_CHANGE=true|false` (default `false`)
 - `RELAY_JOBS_WATCH_INCLUDE_TAIL_ON_CHANGE=true|false` (default `false`)
@@ -320,6 +333,12 @@ The toolkit includes experiment-contract helpers used by long-run callbacks:
   - generate markdown summaries from a run directory (`--registry` optional)
 - `tools/exp/best_run.py`:
   - select best successful run from `exp/registry.jsonl` for a metric
+- `tools/exp/classify_failure.py`:
+  - deterministic error taxonomy (`error_type`, `error_hint`, `error_signature`) for failed/canceled runs
+- `tools/exp/post_run_pipeline.py`:
+  - fail-closed post-run automation (validate -> classify -> registry -> summary -> experience/reflection)
+- `tools/exp/report_registry.py`:
+  - render markdown report tables from `exp/registry.jsonl`
 
 Examples:
 
@@ -327,6 +346,15 @@ Examples:
 python3 tools/exp/render_template.py --template-id train_baseline --set seed=1 --set config=cfg.yaml
 python3 tools/exp/summarize_run.py --run-dir exp/results/<run_id> --registry exp/registry.jsonl
 python3 tools/exp/best_run.py --registry exp/registry.jsonl --metric val_loss --higher-is-better false
+python3 tools/exp/report_registry.py --registry exp/registry.jsonl --out reports/exp_report.md --last 30
+```
+
+### `/exp` command examples
+
+```text
+/exp run train_baseline seed=0 config=cfg.yaml study_id=S001
+/exp best metric=val_loss higher=false
+/exp report last=30 out=reports/exp_report.md
 ```
 
 ## Task Queue (Ralph Loop)
@@ -530,3 +558,26 @@ Frequent causes:
 - `codex-discord-relay-multictl restart` can be intentionally blocked by the drain guard if active runs are present in state; wait for completion or use `/reset`/cancel flow before retrying restart.
 - Timeout too low for long prompts: if you see `codex timeout ...` or `claude timeout ...`, increase `RELAY_AGENT_TIMEOUT_MS`.
 - Intermittent VPN/proxy/API issues can surface as `codex exit 1` with sparse detail; keep transient retry enabled and inspect relay status summaries for "likely transient connectivity/proxy issue".
+
+## Provider Quota/Billing Incidents (OpenClaw Monitoring)
+
+If OpenClaw monitoring requests fail with provider errors (for example `402 Insufficient Balance` on `deepseek/deepseek-chat` or `429 RESOURCE_EXHAUSTED` on Gemini), treat this as an upstream model availability problem, not a relay crash.
+
+Recommended operator response:
+
+1. Send a status handoff message to OpenClaw with exact failure mode and desired behavior.
+2. Instruct OpenClaw to continue monitoring using a fallback provider/model.
+3. If all providers are blocked, ask OpenClaw to stop launching new monitor actions and post a single blocked status.
+
+Copy/paste status handoff template:
+
+```text
+Status update for monitor:
+- Current issue: provider error while handling monitor request.
+- Primary model: deepseek/deepseek-chat -> 402 Insufficient Balance.
+- Fallback: switch to google/gemini-2.5-flash (or another funded provider) and continue.
+- Monitor policy: keep tracking the active Codex experiment; post heartbeat every 10 minutes.
+- Escalation policy: if all providers fail, stop issuing new jobs and report "blocked: provider quota/billing".
+```
+
+Optional temporary config override (OpenClaw side): set `agents.defaults.model.primary` to a funded provider and keep DeepSeek in `fallbacks` until balance is restored.

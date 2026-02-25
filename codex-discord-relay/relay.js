@@ -539,6 +539,14 @@ const CONFIG = {
   })(),
   jobsAutoWatchEverySec: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_EVERY_SEC", 300)),
   jobsAutoWatchTailLines: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_TAIL_LINES", 30)),
+  expCommandsEnabled: boolEnv("RELAY_EXP_COMMANDS_ENABLED", true),
+  expAllowGuilds: boolEnv("RELAY_EXP_ALLOW_GUILDS", true),
+  expDefaultReadyTimeoutSec: Math.max(10, intEnv("RELAY_EXP_DEFAULT_READY_TIMEOUT_SEC", 900)),
+  expDefaultReadyPollSec: Math.max(1, intEnv("RELAY_EXP_DEFAULT_READY_POLL_SEC", 15)),
+  expExperienceLoggingEnabled: boolEnv("RELAY_EXP_EXPERIENCE_LOGGING_ENABLED", true),
+  expWatchSnapshotsEnabled: boolEnv("RELAY_EXP_WATCH_SNAPSHOTS_ENABLED", false),
+  expWatchSnapshotEverySec: Math.max(30, intEnv("RELAY_EXP_WATCH_SNAPSHOT_EVERY_SEC", 300)),
+  expWatchSnapshotTailLines: Math.max(10, intEnv("RELAY_EXP_WATCH_SNAPSHOT_TAIL_LINES", 80)),
 
   progressEnabled: boolEnv("RELAY_PROGRESS", true),
   progressMinEditMs: Math.max(500, intEnv("RELAY_PROGRESS_MIN_EDIT_MS", 5000)),
@@ -3090,7 +3098,7 @@ function extractPrompt(message, botUserId) {
 
 function parseCommand(prompt) {
   const match = prompt.match(
-    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|research|auto|go|overnight|job|ask|inject)\b(?:\s+([\s\S]+))?$/i
+    /^\/(help|status|reset|workdir|attach|upload|context|task|worktree|plan|handoff|research|auto|go|overnight|job|exp|ask|inject)\b(?:\s+([\s\S]+))?$/i
   );
   if (!match) return null;
   return {
@@ -3149,6 +3157,11 @@ function shouldBypassConversationQueue(command) {
     const sub = commandHead(command);
     // list and logs are read-only; no sub also defaults to list.
     return !sub || sub === "list" || sub === "logs";
+  }
+
+  if (command.name === "exp") {
+    const sub = commandHead(command);
+    return !sub || sub === "best" || sub === "report";
   }
 
   return false;
@@ -3340,7 +3353,7 @@ function buildRelayRuntimeContext(meta) {
     `Current workdir: ${workdir}`,
     "",
     "Relay capabilities:",
-    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /research, /auto, /go, /overnight, /job.",
+    "- Slash commands exist for the user: /status, /reset, /workdir, /attach, /upload, /context, /task, /worktree, /plan, /handoff, /research, /auto, /go, /overnight, /job, /exp.",
     "- Tip: `/plan queue <id|last>` can enqueue a plan's Task breakdown into `/task`, then `/task run` can execute sequentially.",
     "- You cannot execute slash commands directly; ask the user to run them when needed.",
     "- If you need to launch a long-running shell job and watch it, you may request relay actions via a JSON block:",
@@ -9790,6 +9803,161 @@ async function startPlanApplyFlow({ conversationKey, message, session, plan, pla
   }
 }
 
+function parseExpNamedArgs(raw) {
+  const tokens = String(raw || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const named = {};
+  const positionals = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token.startsWith("--")) {
+      const body = token.slice(2);
+      if (!body) continue;
+      const eq = body.indexOf("=");
+      let key = body;
+      let value = "";
+      if (eq >= 0) {
+        key = body.slice(0, eq);
+        value = body.slice(eq + 1);
+      } else {
+        const next = tokens[i + 1];
+        if (next && !next.startsWith("--") && !next.includes("=")) {
+          value = next;
+          i += 1;
+        } else {
+          value = "true";
+        }
+      }
+      const normalizedKey = String(key || "")
+        .trim()
+        .toLowerCase()
+        .replace(/-/g, "_");
+      if (normalizedKey) named[normalizedKey] = value;
+      continue;
+    }
+    if (token.includes("=")) {
+      const idx = token.indexOf("=");
+      const key = token.slice(0, idx);
+      const value = token.slice(idx + 1);
+      const normalizedKey = String(key || "")
+        .trim()
+        .toLowerCase()
+        .replace(/-/g, "_");
+      if (normalizedKey) named[normalizedKey] = value;
+      continue;
+    }
+    positionals.push(token);
+  }
+  return { named, positionals };
+}
+
+function parseExpRunSpec(raw) {
+  const tokens = String(raw || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return { ok: false, error: "Usage: `/exp run <template_id> [key=value ...] [study_id=...]`", spec: null };
+  }
+  const templateId = String(tokens.shift() || "").trim();
+  if (!templateId) {
+    return { ok: false, error: "Usage: `/exp run <template_id> [key=value ...] [study_id=...]`", spec: null };
+  }
+
+  const params = [];
+  let studyId = "";
+  let runId = "";
+  let runDir = "";
+  let watchEverySec = null;
+  let watchTailLines = null;
+
+  const parseIntMaybe = (value, min, max) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(min, Math.min(max, Math.floor(n)));
+  };
+
+  for (const token of tokens) {
+    if (!token.includes("=")) {
+      return {
+        ok: false,
+        error: `Invalid token \`${token}\`. Use key=value pairs (example: seed=0 config=cfg.yaml).`,
+        spec: null,
+      };
+    }
+    const idx = token.indexOf("=");
+    const rawKey = token.slice(0, idx).trim();
+    const value = token.slice(idx + 1).trim();
+    if (!rawKey || !value) {
+      return { ok: false, error: `Invalid assignment \`${token}\``, spec: null };
+    }
+    const key = rawKey.toLowerCase().replace(/-/g, "_");
+    if (key === "study_id") {
+      studyId = value;
+      continue;
+    }
+    if (key === "run_id") {
+      runId = value;
+      continue;
+    }
+    if (key === "run_dir") {
+      runDir = value;
+      continue;
+    }
+    if (key === "watch_every_sec" || key === "every_sec") {
+      const parsed = parseIntMaybe(value, 1, 86400);
+      if (parsed == null) return { ok: false, error: `Invalid integer for ${rawKey}: ${value}`, spec: null };
+      watchEverySec = parsed;
+      continue;
+    }
+    if (key === "watch_tail_lines" || key === "tail_lines") {
+      const parsed = parseIntMaybe(value, 1, 500);
+      if (parsed == null) return { ok: false, error: `Invalid integer for ${rawKey}: ${value}`, spec: null };
+      watchTailLines = parsed;
+      continue;
+    }
+    params.push(`${rawKey}=${value}`);
+  }
+
+  return {
+    ok: true,
+    error: "",
+    spec: { templateId, params, studyId, runId, runDir, watchEverySec, watchTailLines },
+  };
+}
+
+function shellJoin(parts) {
+  return (Array.isArray(parts) ? parts : []).map((p) => safeShellArg(String(p))).join(" ");
+}
+
+async function ensureExpToolingAvailable(workdir) {
+  const required = [
+    "scripts/vr_run.sh",
+    "tools/exp/render_template.py",
+    "tools/exp/validate_metrics.py",
+    "tools/exp/append_registry.py",
+    "tools/exp/summarize_run.py",
+    "tools/exp/best_run.py",
+    "tools/exp/report_registry.py",
+    "tools/exp/post_run_pipeline.py",
+  ];
+  const missing = [];
+  for (const rel of required) {
+    const abs = path.resolve(workdir, rel);
+    try {
+      await fsp.access(abs);
+    } catch {
+      missing.push(rel);
+    }
+  }
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+  return { ok: true, missing: [] };
+}
+
 async function handleCommand(message, session, command, conversationKey) {
   if (command.name === "help") {
     await message.reply(
@@ -9811,6 +9979,7 @@ async function handleCommand(message, session, command, conversationKey) {
         "`/research <subcmd>` - research manager (start/status/run/step/pause/stop/note)",
         "`/auto <subcmd>` - per-conversation automation toggles (actions/research on|off)",
         "`/job <subcmd>` - view background jobs (list/logs [id])",
+        "`/exp <run|best|report>` - ML automation helpers backed by exp registry",
         "`/go <task...>` - queue and run immediately (long-run requests auto-wrap into job_start/watch callback mode)",
         "`/overnight <start|status|stop>` - one-command research loop control",
       ].join("\n")
@@ -10877,6 +11046,390 @@ async function handleCommand(message, session, command, conversationKey) {
     }
 
     await message.reply("Usage: `/job list` | `/job logs [<id>]`");
+    return true;
+  }
+
+  if (command.name === "exp") {
+    if (!CONFIG.expCommandsEnabled) {
+      await message.reply("Exp commands are disabled on this relay (RELAY_EXP_COMMANDS_ENABLED=false).");
+      return true;
+    }
+    if (message.guildId && !CONFIG.expAllowGuilds) {
+      await message.reply("Exp commands are disabled in guild channels on this relay. Set RELAY_EXP_ALLOW_GUILDS=true to enable.");
+      return true;
+    }
+
+    const workdir = path.resolve(session.workdir || CONFIG.defaultWorkdir);
+    const { head: subRaw, rest } = splitFirstToken(command.arg);
+    const sub = (subRaw || "").toLowerCase();
+
+    if (!sub) {
+      await sendLongReply(
+        message,
+        [
+          "Usage:",
+          "- `/exp run <template_id> [key=value ...] [study_id=S001]`",
+          "- `/exp best [metric=loss] [higher=false] [registry=exp/registry.jsonl]`",
+          "- `/exp report [last=30] [out=reports/exp_report.md] [registry=exp/registry.jsonl]`",
+          "",
+          `workdir: ${workdir}`,
+          `enabled: ${CONFIG.expCommandsEnabled} guilds_allowed: ${CONFIG.expAllowGuilds}`,
+          `defaults: ready_timeout=${CONFIG.expDefaultReadyTimeoutSec}s ready_poll=${CONFIG.expDefaultReadyPollSec}s`,
+          `experience_logging: ${CONFIG.expExperienceLoggingEnabled}`,
+          `watch_snapshots: ${CONFIG.expWatchSnapshotsEnabled} every_sec=${CONFIG.expWatchSnapshotEverySec} tail_lines=${CONFIG.expWatchSnapshotTailLines}`,
+        ].join("\n")
+      );
+      return true;
+    }
+
+    const tooling = await ensureExpToolingAvailable(workdir);
+    if (!tooling.ok) {
+      await sendLongReply(
+        message,
+        [
+          "Missing required exp tooling in current workdir.",
+          `workdir: ${workdir}`,
+          ...tooling.missing.map((item) => `- ${item}`),
+          "Use `/workdir <repo_root>` that contains tools/exp and scripts/vr_run.sh.",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    if (sub === "run") {
+      const parsed = parseExpRunSpec(rest);
+      if (!parsed.ok || !parsed.spec) {
+        await message.reply(parsed.error || "Usage: `/exp run <template_id> [key=value ...]`");
+        return true;
+      }
+      const spec = parsed.spec;
+
+      const existing = findLatestJob(session, { requireRunning: true });
+      if (existing) {
+        await message.reply(`Refusing /exp run while job \`${existing.id}\` is still running.`);
+        return true;
+      }
+
+      const renderArgs = ["tools/exp/render_template.py", "--template-id", spec.templateId, "--compact"];
+      for (const kv of spec.params) {
+        renderArgs.push("--set", kv);
+      }
+      if (spec.runId) renderArgs.push("--run-id", spec.runId);
+      if (spec.runDir) renderArgs.push("--run-dir", spec.runDir);
+
+      const renderRes = await execFileCapture("python3", renderArgs, { cwd: workdir, timeoutMs: 45_000 });
+      if (renderRes.code !== 0) {
+        await sendLongReply(
+          message,
+          [
+            "Template render failed.",
+            `command: python3 ${renderArgs.join(" ")}`,
+            "stderr:",
+            "```",
+            String(renderRes.stderr || renderRes.stdout || "").slice(0, 1500),
+            "```",
+          ].join("\n")
+        );
+        return true;
+      }
+
+      let rendered = null;
+      try {
+        rendered = JSON.parse(String(renderRes.stdout || "").trim());
+      } catch (err) {
+        await sendLongReply(
+          message,
+          [
+            "Template render returned non-JSON output.",
+            "stdout:",
+            "```",
+            String(renderRes.stdout || "").slice(0, 1500),
+            "```",
+            "stderr:",
+            "```",
+            String(renderRes.stderr || "").slice(0, 1200),
+            "```",
+            `parse_error: ${String(err && err.message ? err.message : err)}`,
+          ].join("\n")
+        );
+        return true;
+      }
+
+      const commandParts = Array.isArray(rendered && rendered.command) ? rendered.command : null;
+      if (!commandParts || commandParts.length === 0) {
+        await message.reply("Rendered template is missing a command array.");
+        return true;
+      }
+
+      const runId = String((rendered && rendered.run_id) || spec.runId || `r${stampCompact()}`).trim();
+      const runDir = String((rendered && rendered.run_dir) || spec.runDir || `exp/results/${runId}`).trim();
+      if (!runId || !runDir) {
+        await message.reply("Rendered template produced empty run_id/run_dir.");
+        return true;
+      }
+
+      const trainCommand = shellJoin(commandParts);
+      const vrCommand = [
+        "bash",
+        "scripts/vr_run.sh",
+        "--run-id",
+        runId,
+        "--run-dir",
+        runDir,
+        "--",
+        ...commandParts.map((x) => String(x)),
+      ];
+      const vrCommandText = shellJoin(vrCommand);
+
+      const postArgs = [
+        "python3",
+        "tools/exp/post_run_pipeline.py",
+        "--run-dir",
+        runDir,
+        "--registry",
+        "exp/registry.jsonl",
+        "--experience",
+        "exp/experience.jsonl",
+        "--handoff",
+        "HANDOFF_LOG.md",
+        "--working-memory",
+        "docs/WORKING_MEMORY.md",
+        "--rolling-report",
+        "reports/rolling_report.md",
+        "--template-id",
+        String((rendered && rendered.template_id) || spec.templateId || ""),
+      ];
+      if (spec.studyId) {
+        postArgs.push("--study-id", spec.studyId);
+      }
+      if (!CONFIG.expExperienceLoggingEnabled) {
+        postArgs.push("--skip-experience");
+      }
+      const postCommandText = shellJoin(postArgs);
+
+      const pipelineCommand = [
+        `export RELAY_EXP_WATCH_SNAPSHOTS_ENABLED=${CONFIG.expWatchSnapshotsEnabled ? "true" : "false"}`,
+        `export RELAY_EXP_WATCH_SNAPSHOT_EVERY_SEC=${Math.max(30, CONFIG.expWatchSnapshotEverySec)}`,
+        `export RELAY_EXP_WATCH_SNAPSHOT_TAIL_LINES=${Math.max(10, CONFIG.expWatchSnapshotTailLines)}`,
+        vrCommandText,
+        "VR_EXIT=$?",
+        postCommandText,
+        "POST_EXIT=$?",
+        'if [ "$VR_EXIT" -ne 0 ]; then exit "$VR_EXIT"; fi',
+        'exit "$POST_EXIT"',
+      ].join("; ");
+
+      const descriptionParts = [
+        `exp:${String((rendered && rendered.template_id) || spec.templateId)}`,
+        `run=${runId}`,
+      ];
+      if (spec.studyId) descriptionParts.push(`study=${spec.studyId}`);
+
+      const started = await startJobProcess({
+        conversationKey,
+        session,
+        command: pipelineCommand,
+        workdir,
+        description: descriptionParts.join(" "),
+      });
+      if (!started.ok || !started.job) {
+        await message.reply(`Failed to start exp run: ${started.error || "unknown error"}`);
+        return true;
+      }
+
+      const job = started.job;
+      const templateWatch = rendered && rendered.watch && typeof rendered.watch === "object" ? rendered.watch : {};
+      const defaultRequireFiles = [`${runDir}/metrics.json`, `${runDir}/meta.json`, `${runDir}/train.log`];
+      const mergedRequireFiles = Array.isArray(templateWatch.requireFiles) && templateWatch.requireFiles.length > 0
+        ? Array.from(new Set([...templateWatch.requireFiles.map((x) => String(x || "").trim()).filter(Boolean), ...defaultRequireFiles]))
+        : defaultRequireFiles;
+
+      const watchRaw = {
+        ...templateWatch,
+        everySec:
+          spec.watchEverySec != null
+            ? spec.watchEverySec
+            : Number.isFinite(Number(templateWatch.everySec))
+            ? Number(templateWatch.everySec)
+            : CONFIG.jobsAutoWatchEverySec,
+        tailLines:
+          spec.watchTailLines != null
+            ? spec.watchTailLines
+            : Number.isFinite(Number(templateWatch.tailLines))
+            ? Number(templateWatch.tailLines)
+            : CONFIG.jobsAutoWatchTailLines,
+        requireFiles: mergedRequireFiles,
+        readyTimeoutSec:
+          Number.isFinite(Number(templateWatch.readyTimeoutSec))
+            ? Number(templateWatch.readyTimeoutSec)
+            : CONFIG.expDefaultReadyTimeoutSec,
+        readyPollSec:
+          Number.isFinite(Number(templateWatch.readyPollSec))
+            ? Number(templateWatch.readyPollSec)
+            : CONFIG.expDefaultReadyPollSec,
+        onMissing: "block",
+        long: true,
+      };
+
+      const watchCfg = normalizeJobWatchConfig(watchRaw, {
+        everySecDefault: CONFIG.jobsAutoWatchEverySec,
+        tailLinesDefault: CONFIG.jobsAutoWatchTailLines,
+        jobCommand: trainCommand,
+        workdir,
+      });
+
+      const watchRes = await startJobWatcher({
+        conversationKey,
+        session,
+        job,
+        channelId: message.channel && message.channel.id ? String(message.channel.id) : session.lastChannelId,
+        watchConfig: watchCfg,
+      });
+      if (!watchRes || !watchRes.ok) {
+        await message.reply("Run started, but watcher failed to start.");
+        return true;
+      }
+
+      await sendLongReply(
+        message,
+        [
+          `Started experiment job \`${job.id}\`.`,
+          `template: \`${String((rendered && rendered.template_id) || spec.templateId)}\``,
+          `run_id: \`${runId}\``,
+          `run_dir: \`${runDir}\``,
+          `study_id: \`${spec.studyId || ""}\``,
+          `watch: everySec=${watchCfg.everySec} tailLines=${watchCfg.tailLines}`,
+          "Post-run pipeline is chained automatically (validate -> classify -> registry -> report -> experience/reflection).",
+          `Best-run query: \`/exp best metric=${String(
+            rendered && rendered.primary_metric && rendered.primary_metric.name ? rendered.primary_metric.name : "objective"
+          )}\``,
+          "Summary report: `/exp report last=30`",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    if (sub === "best") {
+      const parsed = parseExpNamedArgs(rest);
+      const metric = String(parsed.named.metric || parsed.named.primary || parsed.positionals[0] || "").trim();
+      const higher = String(parsed.named.higher || parsed.named.higher_is_better || parsed.named.hib || "auto").trim().toLowerCase();
+      const registry = String(parsed.named.registry || "exp/registry.jsonl").trim();
+      const topRaw = parsed.named.top;
+      const top = Number.isFinite(Number(topRaw)) ? Math.max(1, Math.min(20, Math.floor(Number(topRaw)))) : 5;
+      const args = ["tools/exp/best_run.py", "--registry", registry, "--higher-is-better", higher, "--top", String(top), "--json"];
+      if (metric) args.push("--metric", metric);
+
+      const res = await execFileCapture("python3", args, { cwd: workdir, timeoutMs: 45_000 });
+      if (res.code !== 0) {
+        await sendLongReply(
+          message,
+          [
+            "Best-run query failed.",
+            "stderr:",
+            "```",
+            String(res.stderr || res.stdout || "").slice(0, 1500),
+            "```",
+          ].join("\n")
+        );
+        return true;
+      }
+
+      let payload = null;
+      try {
+        payload = JSON.parse(String(res.stdout || "").trim());
+      } catch (err) {
+        await sendLongReply(
+          message,
+          [
+            "Best-run query returned invalid JSON.",
+            "stdout:",
+            "```",
+            String(res.stdout || "").slice(0, 1200),
+            "```",
+            `parse_error: ${String(err && err.message ? err.message : err)}`,
+          ].join("\n")
+        );
+        return true;
+      }
+
+      const best = payload && payload.best && typeof payload.best === "object" ? payload.best : {};
+      const paths = best && best.paths && typeof best.paths === "object" ? best.paths : {};
+      const runDir = String(paths.run_dir || "").trim();
+      await sendLongReply(
+        message,
+        [
+          `Best run: \`${String(best.run_id || "")}\``,
+          `metric: \`${String(payload.metric || "")}\``,
+          `value: \`${String(best.value || "")}\``,
+          `higher_is_better: \`${String(payload.higher_is_better || "")}\``,
+          `considered: \`${String(payload.considered || "")}\``,
+          `run_dir: \`${runDir}\``,
+          runDir
+            ? `summarize: \`python3 tools/exp/summarize_run.py --run-dir ${runDir} --registry ${String(payload.registry || registry)}\``
+            : "summarize: n/a",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    if (sub === "report") {
+      const parsed = parseExpNamedArgs(rest);
+      const registry = String(parsed.named.registry || "exp/registry.jsonl").trim();
+      const outPath = String(parsed.named.out || "reports/exp_report.md").trim();
+      const lastRaw = parsed.named.last || parsed.positionals[0] || "30";
+      const metric = String(parsed.named.metric || "").trim();
+      const higher = String(parsed.named.higher || parsed.named.higher_is_better || parsed.named.hib || "auto").trim().toLowerCase();
+      const last = Number.isFinite(Number(lastRaw)) ? Math.max(1, Math.min(500, Math.floor(Number(lastRaw)))) : 30;
+      const args = [
+        "tools/exp/report_registry.py",
+        "--registry",
+        registry,
+        "--out",
+        outPath,
+        "--last",
+        String(last),
+        "--higher-is-better",
+        higher,
+      ];
+      if (metric) args.push("--metric", metric);
+
+      const res = await execFileCapture("python3", args, { cwd: workdir, timeoutMs: 45_000 });
+      if (res.code !== 0) {
+        await sendLongReply(
+          message,
+          [
+            "Report generation failed.",
+            "stderr:",
+            "```",
+            String(res.stderr || res.stdout || "").slice(0, 1500),
+            "```",
+          ].join("\n")
+        );
+        return true;
+      }
+
+      const outAbs = path.resolve(workdir, outPath);
+      let excerpt = "";
+      try {
+        const raw = await fsp.readFile(outAbs, "utf8");
+        excerpt = raw
+          .split(/\r?\n/)
+          .slice(0, 10)
+          .join("\n")
+          .trim();
+      } catch {}
+
+      await sendLongReply(
+        message,
+        [
+          `Report updated: \`${outAbs}\``,
+          excerpt ? "excerpt:\n```md\n" + excerpt + "\n```" : "(report excerpt unavailable)",
+        ].join("\n")
+      );
+      return true;
+    }
+
+    await message.reply("Usage: `/exp run ...` | `/exp best ...` | `/exp report ...`");
     return true;
   }
 

@@ -74,6 +74,11 @@ In Discord, DM the relay bot and run `/status`.
 - `/job list` — recent jobs in this conversation
 - `/job logs <id>` — tail logs for one job
 
+### ML automation
+- `/exp run <template_id> ...` — template-backed experiment launch (`vr_run.sh` + post-run pipeline)
+- `/exp best ...` — show current best run from registry
+- `/exp report ...` — generate markdown run report from registry
+
 ### Continuity
 - `/handoff` — append/update handoff and memory artifacts
 
@@ -144,6 +149,30 @@ python3 tools/exp/summarize_run.py --run-dir exp/results/rtest --out-md reports/
 Registry behavior:
 - `exp/registry.jsonl` is append-only.
 - duplicate `run_id` is rejected by default (fail-closed).
+
+## 6C) ML Automation (Exp Commands)
+
+The relay exposes first-class experiment commands that build on the run contract tools.
+
+Examples:
+
+```text
+/exp run train_baseline seed=0 config=cfg.yaml study_id=S001
+/exp best metric=loss higher=false
+/exp report last=30
+```
+
+`/exp run` flow:
+1. Render template (`tools/exp/render_template.py`)
+2. Launch run via `scripts/vr_run.sh`
+3. Auto-run post pipeline (`tools/exp/post_run_pipeline.py`)
+
+Post pipeline outputs:
+- deterministic failure taxonomy (`error_type`, `error_hint`, `error_signature`)
+- registry append (`exp/registry.jsonl`)
+- rolling markdown summary (`reports/rolling_report.md`)
+- experience log (`exp/experience.jsonl`)
+- reflection stub (`exp/reflections/<run_id>.md`)
 
 ## 6B) Supervisor-backed long runs (recommended in v1.1.0)
 

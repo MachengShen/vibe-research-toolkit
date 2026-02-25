@@ -1512,3 +1512,62 @@
 ### Commit record
 - `13f99f7` docs: refresh README/manual for supervisor portability design
 - scope: `README.md`, `docs/USER_MANUAL.md`, `CHANGELOG.md`, plus project handoff/memory updates.
+## 2026-02-25T15:37:20+08:00
+### Objective
+- Implement the ML automation extension from the v1.1.0 next-steps handoff: `/exp run|best|report`, deterministic failure taxonomy, post-run pipeline, and report/experience artifacts.
+
+### Changes
+- Added new tooling:
+  - `tools/exp/classify_failure.py`
+  - `tools/exp/post_run_pipeline.py`
+  - `tools/exp/report_registry.py`
+- Extended `tools/exp/render_template.py` compatibility aliases (`--id`, `--param`) and documented optional failure-taxonomy fields in `tools/exp/metrics_schema.json`.
+- Implemented relay `/exp` command family in `codex-discord-relay/relay.js`:
+  - `/exp run <template_id> ...` renders template, launches `scripts/vr_run.sh`, and chains `post_run_pipeline.py` automatically.
+  - `/exp best ...` wraps `tools/exp/best_run.py --json`.
+  - `/exp report ...` wraps `tools/exp/report_registry.py` and returns report excerpt.
+- Added relay config knobs for exp automation (`RELAY_EXP_*`) and updated docs/env examples:
+  - `codex-discord-relay/.env.example`
+  - `codex-discord-relay/README.md`
+  - `docs/USER_MANUAL.md`
+  - skill docs under `packaged-skills/codex/*`.
+- Synced live relay runtime/docs/env files:
+  - `/root/codex-discord-relay/{relay.js,README.md,.env.example}`
+
+### Verification
+- Syntax checks passed:
+  - `node --check` on toolkit/live `relay.js`
+  - `python3 -m py_compile` on updated `tools/exp/*.py`
+- Acceptance suite (tooling) passed using temp artifacts:
+  - render + wrapper + validate + classify + registry append + report generation (`/tmp/r_test_20260225_153428`, `/tmp/registry_20260225_153428.jsonl`, `/tmp/exp_report_20260225_153428.md`).
+- Testbed simulation passed (success + failure):
+  - `run_id=r_toy_ok_20260225_153439`
+  - `run_id=r_toy_fail_20260225_153439`
+  - post-run pipeline verified registry/experience/rolling-report outputs.
+- Live relay activation restart is drain-blocked by active runs; guarded retry worker started:
+  - script `/tmp/restart_default_retry_exp.sh`
+  - pid `25868`
+  - log `/tmp/restart_default_retry_exp.log`
+
+### Exact command(s) run
+- `python3 -m py_compile tools/exp/{classify_failure.py,post_run_pipeline.py,report_registry.py,render_template.py}`
+- `node --check codex-discord-relay/relay.js && node --check /root/codex-discord-relay/relay.js`
+- `python3 tools/exp/render_template.py --id train_baseline ... ; bash scripts/vr_run.sh ... ; python3 tools/exp/{validate_metrics.py,classify_failure.py,append_registry.py,report_registry.py} ...`
+- `bash scripts/vr_run.sh ... toy_train.py (ok/fail) ; python3 tools/exp/post_run_pipeline.py ...`
+- `/usr/local/bin/codex-discord-relay-multictl restart default (blocked rc=4); setsid /tmp/restart_default_retry_exp.sh`
+
+### Evidence
+- `/root/VibeResearch_toolkit/tools/exp/classify_failure.py`
+- `/root/VibeResearch_toolkit/tools/exp/post_run_pipeline.py`
+- `/root/VibeResearch_toolkit/tools/exp/report_registry.py`
+- `/root/VibeResearch_toolkit/codex-discord-relay/relay.js`
+- `/root/VibeResearch_toolkit/codex-discord-relay/.env.example`
+- `/root/VibeResearch_toolkit/codex-discord-relay/README.md`
+- `/root/VibeResearch_toolkit/docs/USER_MANUAL.md`
+- `/root/VibeResearch_toolkit/packaged-skills/codex/relay-long-task-callback/SKILL.md`
+- `/root/VibeResearch_toolkit/packaged-skills/codex/ml-run-monitor-decider/SKILL.md`
+- `/root/codex-discord-relay/relay.js`
+- `/tmp/restart_default_retry_exp.log`
+
+### Next steps
+- After drain-based restart succeeds, run one in-thread `/exp run` canary and verify end-to-end watcher + post-run artifact generation through live relay path.

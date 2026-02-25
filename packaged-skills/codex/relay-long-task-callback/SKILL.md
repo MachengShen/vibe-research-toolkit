@@ -33,6 +33,7 @@ If required information is missing, do not guess critical paths or commands. Ret
 
 ## Practical Rules
 
+- Preferred path for template-backed ML runs: ask the user to use `/exp run ...` first, then fall back to raw `job_start` only when template/contract tooling is unavailable.
 - Keep JSON on one line and do not include comments or trailing commas.
 - Prefer launching a wrapper script, then start it with `bash /tmp/<name>.sh` or a repo-local script path.
 - Ensure the command writes logs deterministically so follow-up analysis can inspect them.

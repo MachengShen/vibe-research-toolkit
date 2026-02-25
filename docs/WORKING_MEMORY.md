@@ -443,3 +443,35 @@ python3 tools/exp/summarize_run.py --run-dir /tmp/vrtest/rtest-... --out-md /tmp
 ### Latest commit reference
 - `13f99f7` docs: refresh README/manual for supervisor portability design.
 - Significance: user-facing docs now explicitly reflect the Phase 1 supervisor + bundled portability architecture and recommended rollout path.
+## 2026-02-25T15:37:33+08:00
+### Objective
+- Ship first-class relay ML automation commands and deterministic post-run learning artifacts.
+
+### Current state
+- `/exp` command family implemented in relay runtime:
+  - `/exp run` -> template render + `vr_run.sh` launch + chained `post_run_pipeline.py`
+  - `/exp best` -> registry best-run query
+  - `/exp report` -> markdown report generation + excerpt
+- New exp tooling available:
+  - `tools/exp/classify_failure.py`
+  - `tools/exp/post_run_pipeline.py`
+  - `tools/exp/report_registry.py`
+- Compatibility update: `render_template.py` now accepts `--id` and `--param` aliases.
+- Docs/skills/env updated for operator usage and defaults (`RELAY_EXP_*`).
+
+### Validation snapshot
+- Tooling acceptance checks passed (render/wrap/validate/classify/append/report).
+- Toy run simulations passed for both success and failure post-run pipelines.
+- Live relay code synced to `/root/codex-discord-relay`, but in-memory activation is waiting for drained safe restart.
+
+### Runtime activation
+- Guarded restart worker active:
+  - script: `/tmp/restart_default_retry_exp.sh`
+  - log: `/tmp/restart_default_retry_exp.log`
+
+### Next step
+- Run one live `/exp run` canary after restart and verify:
+  - job watcher updates
+  - registry append (`exp/registry.jsonl`)
+  - report update (`reports/rolling_report.md` + optional `/exp report` output)
+  - experience/reflection artifacts.

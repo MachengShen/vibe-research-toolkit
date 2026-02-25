@@ -78,14 +78,27 @@ def render_value(value: Any, values: dict[str, Any]) -> Any:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--template-id", required=True, help="Template id from templates/experiments/*.yaml")
+    parser.add_argument(
+        "--template-id",
+        "--id",
+        dest="template_id",
+        required=True,
+        help="Template id from templates/experiments/*.yaml",
+    )
     parser.add_argument(
         "--templates-dir",
         type=pathlib.Path,
         default=pathlib.Path("templates/experiments"),
         help="Directory containing YAML templates",
     )
-    parser.add_argument("--set", action="append", default=[], help="Template value override in key=value form")
+    parser.add_argument(
+        "--set",
+        "--param",
+        dest="set_values",
+        action="append",
+        default=[],
+        help="Template value override in key=value form",
+    )
     parser.add_argument("--run-id", help="Run id override (default generated)")
     parser.add_argument("--run-dir", help="Run dir override (default exp/results/<run_id>)")
     parser.add_argument("--compact", action="store_true", help="Compact JSON output")
@@ -99,7 +112,7 @@ def main() -> int:
 
     defaults = template.get("defaults") if isinstance(template.get("defaults"), dict) else {}
     try:
-        overrides = parse_kv(list(args.set))
+        overrides = parse_kv(list(args.set_values))
     except ValueError as exc:
         print(f"[render_template][fail] {exc}", file=sys.stderr)
         return 1

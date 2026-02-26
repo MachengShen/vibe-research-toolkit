@@ -2,7 +2,7 @@
 
 This manual is for researchers running experiments through the Discord relay + agent stack in this repo.
 
-Stable reference release: `v1.1.0`.
+Stable reference release: `v1.1.1`.
 
 ## 1) What you get
 
@@ -174,7 +174,7 @@ Post pipeline outputs:
 - experience log (`exp/experience.jsonl`)
 - reflection stub (`exp/reflections/<run_id>.md`)
 
-## 6B) Supervisor-backed long runs (recommended in v1.1.0)
+## 6B) Supervisor-backed long runs (recommended in v1.1.1)
 
 For high-value long jobs, prefer the relay supervisor path so callback analysis only runs after explicit state/artifact checks.
 
@@ -187,7 +187,7 @@ Minimal action example:
 
 ```text
 [[relay-actions]]
-{"actions":[{"type":"job_start","description":"maze2d phase1 canary","command":"echo use-supervisor-contract","supervisor":{"mode":"stage0_smoke_gate","runId":"r_phase1_canary","stateFile":"exp/results/r_phase1_canary/state.json","smokeCmd":"python -c 'print(\"smoke\")'","fullCmd":"python train.py --config cfg.yaml","cleanupSmokePolicy":"keep_manifest_only"},"watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze final artifacts and summarize metrics.","runTasks":true}}]}
+{"actions":[{"type":"job_start","description":"phase1 canary","command":"echo use-supervisor-contract","supervisor":{"mode":"stage0_smoke_gate","runId":"r_phase1_canary","stateFile":"exp/results/r_phase1_canary/state.json","smokeCmd":"python -c 'print(\"smoke\")'","fullCmd":"python train.py --config cfg.yaml","cleanupSmokePolicy":"keep_manifest_only"},"watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze final artifacts and summarize metrics.","runTasks":true}}]}
 [[/relay-actions]]
 ```
 

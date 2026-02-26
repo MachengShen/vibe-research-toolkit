@@ -151,7 +151,7 @@ Marker syntax (agent output):
 [[relay-actions]]
 {"actions":[
   {"type":"job_start",
-   "description":"Train maze2d EBM sweep (seed 1/3)",
+   "description":"Train baseline sweep (seed 1/3)",
    "command":"python train.py --config cfg.yaml",
    "watch":{"everySec":300,"tailLines":20,
             "thenTask":"Analyze results and write a short report in HANDOFF_LOG.md",
@@ -498,6 +498,7 @@ These `.env` variables control intermediate status edits in Discord:
 - `RELAY_PROGRESS_PERSISTENT_EVERY_MS=<int>` (default `45000`; min interval between persistent updates)
 - `RELAY_PROGRESS_PERSISTENT_ORCHESTRATOR_EVERY_MS=<int>` (default `15000`; min interval between durable orchestrator updates)
 - `RELAY_PROGRESS_PERSISTENT_MAX_PER_RUN=<int>` (default `6`)
+- `RELAY_PROGRESS_PERSISTENT_SUPPRESS_SYSTEM_MILESTONES=true|false` (default `true`; hide system checkpoint milestones like queued/waiting/start/context to reduce interleaving with assistant replies)
 - `RELAY_PROGRESS_PERSISTENT_MODE=all|narrative|narrative+milestones|narrative+milestones+orchestrator|off` (default `all`; `narrative` suppresses low-signal command/tool trace lines; `narrative+milestones` also posts explicit relay checkpoint summaries; `narrative+milestones+orchestrator` additionally persists "Thinking: ..." style orchestration notes)
 - `RELAY_PROGRESS_PERSISTENT_MIN_CHARS=<int>` (default `32`; narrative mode drops very short notes)
 - `RELAY_PROGRESS_PERSISTENT_MAX_CHARS=<int>` (default `320`; cap each durable progress note)

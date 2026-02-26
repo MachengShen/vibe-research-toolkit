@@ -23,6 +23,16 @@ All notable changes to `vibe-research-toolkit` are documented in this file.
 - `scripts/lint_repo.sh` now requires packaged skill frontmatter to include `version`.
 - Packaged skills now include explicit `version` in YAML frontmatter.
 
+## [1.1.1] - 2026-02-26
+
+### Added
+- Relay durable-progress control `RELAY_PROGRESS_PERSISTENT_SUPPRESS_SYSTEM_MILESTONES` (default `true`) to suppress low-signal system milestones (`queued/waiting/start/context/attachments`) that can interleave with assistant output.
+
+### Changed
+- Claude heavy-model keyword heuristics now correctly match `investigate` forms (`investigate`, `investigation`, `investigating`).
+- Public docs/examples sanitized to remove personal-project wording (for example Maze2D/EBM-specific example text).
+- Release branch tracks machine-local continuity/state artifacts as local-only (`HANDOFF_LOG.md`, `docs/WORKING_MEMORY.md`, `machine-state/*` removed from distributable release surface).
+
 ## [1.1.0] - 2026-02-24
 
 ### Added

@@ -568,6 +568,10 @@ const CONFIG = {
   ),
   progressPersistentMinChars: Math.max(1, intEnv("RELAY_PROGRESS_PERSISTENT_MIN_CHARS", 32)),
   progressPersistentMaxChars: Math.max(120, intEnv("RELAY_PROGRESS_PERSISTENT_MAX_CHARS", 320)),
+  progressPersistentSuppressSystemMilestones: boolEnv(
+    "RELAY_PROGRESS_PERSISTENT_SUPPRESS_SYSTEM_MILESTONES",
+    true
+  ),
   statusSummaryEnabled: boolEnv("RELAY_STATUS_SUMMARY", true),
   interruptQuestionsEnabled: boolEnv("RELAY_INTERRUPT_QUESTIONS_ENABLED", true),
   interruptQuestionsAuto: boolEnv("RELAY_INTERRUPT_QUESTIONS_AUTO", false),
@@ -2528,6 +2532,20 @@ function derivePersistentProgressMilestone(cleanedText) {
   return "";
 }
 
+const PERSISTENT_PROGRESS_SYSTEM_MILESTONES = new Set([
+  "milestone: request queued",
+  "milestone: waiting for earlier queued request",
+  "milestone: run started",
+  "milestone: context loaded",
+  "milestone: attachments loaded",
+]);
+
+function isSuppressedPersistentSystemMilestone(cleanedText) {
+  if (!CONFIG.progressPersistentSuppressSystemMilestones) return false;
+  const key = String(cleanedText || "").trim().toLowerCase();
+  return PERSISTENT_PROGRESS_SYSTEM_MILESTONES.has(key);
+}
+
 function derivePersistentProgressOrchestrator(cleanedText) {
   const text = String(cleanedText || "").trim();
   if (!text) return "";
@@ -2555,7 +2573,7 @@ function derivePersistentProgressOrchestrator(cleanedText) {
   // Convert common concise action phrases into natural first-person.
   if (/^[A-Za-z]+ing\b/.test(body)) return `I'm ${lowerStart(body)}`;
   if (
-    /^(plan|check|read|review|inspect|analy[sz]e|summari[sz]e|trace|gather|collect|run|test|update|patch|sync|restart|verify|investigat|fix|debug|search|open)\b/i.test(
+    /^(plan|check|read|review|inspect|analy[sz]e|summari[sz]e|trace|gather|collect|run|test|update|patch|sync|restart|verify|(?:investigate|investigation|investigating)|fix|debug|search|open)\b/i.test(
       body
     )
   ) {
@@ -2834,6 +2852,7 @@ function createProgressReporter(pendingMsg, conversationKey, { runId = null, run
     const isMilestone = Boolean(normalized && normalized.isMilestone);
     const isOrchestrator = Boolean(normalized && normalized.isOrchestrator);
     if (!cleaned) return;
+    if (isMilestone && isSuppressedPersistentSystemMilestone(cleaned)) return;
     const now = Date.now();
     if (!force) {
       if (persistentSent >= CONFIG.progressPersistentMaxPerRun) return;
@@ -3673,7 +3692,7 @@ function shouldPreferClaudeHeavyModel(userPrompt = "", runLabel = "") {
   const text = `${String(userPrompt || "")}\n${String(runLabel || "")}`.toLowerCase();
   if (!text.trim()) return false;
   if (text.length >= 1200) return true;
-  return /\b(reason|reasoning|research|analy[sz]e|investigat|hypothesis|ablation|compare|architecture|design|strategy|debug|root cause|proof|derive|math|complex|optimi[sz]e|benchmark)\b/.test(
+  return /\b(reason|reasoning|research|analy[sz]e|investigate|investigation|investigating|hypothesis|ablation|compare|architecture|design|strategy|debug|root cause|proof|derive|math|complex|optimi[sz]e|benchmark)\b/.test(
     text
   );
 }

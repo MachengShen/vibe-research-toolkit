@@ -10,16 +10,16 @@ This repository combines:
 
 ## Stable Release
 
-- Current stable release: `v1.1.0`
+- Current stable release: `v1.1.1`
 - Release metadata:
   - `VERSION`
   - `CHANGELOG.md`
 
-## Latest Design Feature (v1.1.0)
+## Latest Design Feature (v1.1.1)
 
+- **Privacy-hardened release surface**: machine-local continuity/state artifacts are now intended to stay local (`.gitignore` + release cleanup), so public tags avoid leaking personal project paths/history.
+- **Cleaner Discord updates**: durable progress can suppress low-signal system milestones with `RELAY_PROGRESS_PERSISTENT_SUPPRESS_SYSTEM_MILESTONES=true`, reducing interleaving noise with assistant responses.
 - **Relay-native supervisor contract**: long jobs can launch with `job_start.supervisor` so callback follow-ups are gated by explicit state/artifact checks instead of best-effort process exit handling.
-- **Portable stage0 runner**: default stage0 smoke-gate is now bundled at `codex-discord-relay/scripts/stage0_smoke_gate.py`, removing the old operational dependency on `/root/ebm-online-rl-prototype`.
-- **Safer rollout path**: enable with `RELAY_SUPERVISOR_PHASE1_ENABLED=true`, restart safely, run one in-thread canary, then expand to broader usage.
 
 ## Why This Is Built For ML Researchers
 
@@ -31,7 +31,7 @@ Most agent tooling optimizes for one-shot automation. Research work is iterative
 - **Relay Callback design**: long jobs can auto-enqueue analysis tasks on completion, so experiments continue without manual babysitting.
 - **Hypothesis-driven skill stack**: bundled skills bias toward discriminative experiments and structured ablations, not trivial “try random settings” loops.
 - **Parallel experiment isolation**: git worktrees make branch-per-hypothesis and parallel ablations clean and reversible.
-- **Persistent research memory**: `WORKING_MEMORY.md` + append-only `HANDOFF_LOG.md` preserve continuity across agents/sessions.
+- **Persistent research memory**: local continuity artifacts (`docs/WORKING_MEMORY.md`, `HANDOFF_LOG.md`) preserve cross-session context without being published in releases.
 - **Operational observability**: `/status`, `/task list`, `/job list`, logs, and callback traces expose real run state.
 - **Reproducible machine state**: export/apply scripts keep relay + env setup portable across machines.
 
@@ -150,7 +150,7 @@ For long training/eval/sweep jobs, use relay actions so completion triggers anal
 
 ```text
 [[relay-actions]]
-{"actions":[{"type":"job_start","description":"maze2d ablation seed=1","command":"bash scripts/run_ablation_seed1.sh","watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze logs/maze2d_seed1.log and summarize final metrics, failures, and next experiment.","thenTaskDescription":"Analyze maze2d seed=1 results","runTasks":true}}]}
+{"actions":[{"type":"job_start","description":"baseline ablation seed=1","command":"bash scripts/run_ablation_seed1.sh","watch":{"everySec":300,"tailLines":30,"thenTask":"Analyze logs/ablation_seed1.log and summarize final metrics, failures, and next experiment.","thenTaskDescription":"Analyze seed=1 results","runTasks":true}}]}
 [[/relay-actions]]
 ```
 
@@ -170,8 +170,8 @@ This avoids dead time between run completion and interpretation.
 
 - User manual: `docs/USER_MANUAL.md`
 - ML design guide: `docs/ML_RESEARCH_DESIGN.md`
-- Working memory snapshot: `docs/WORKING_MEMORY.md`
-- Chronological handoff history: `HANDOFF_LOG.md`
+- Local working memory snapshot (gitignored): `docs/WORKING_MEMORY.md`
+- Local handoff history (gitignored): `HANDOFF_LOG.md`
 
 ## Development / CI
 

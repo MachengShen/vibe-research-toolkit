@@ -173,6 +173,7 @@ Notes:
 - Watchers post periodic updates and can enqueue a follow-up `/task` when the job finishes.
 - Default watcher output is compact (summary + output delta) and suppresses no-change spam.
 - `job_start.description` and `watch.thenTaskDescription` are optional but recommended so progress updates stay readable.
+- `watch.runTasks` is optional. If omitted and `watch.thenTask` is set, relay uses `RELAY_JOBS_THEN_TASK_DEFAULT_RUN_TASKS`.
 - Job-finish finalization (`exit_code` detection + `thenTask` enqueue) runs outside the normal conversation queue so callbacks still fire even if a foreground agent run is stuck.
 - Optional watch-contract v2 fields:
   - `watch.requireFiles`: callback waits until all listed files exist (when feature flag is enabled).
@@ -205,6 +206,7 @@ Env knobs:
 - `RELAY_JOBS_AUTO_WATCH=true|false` (default `true` only if actions enabled)
 - `RELAY_JOBS_AUTO_WATCH_EVERY_SEC=<int>` (default `300`)
 - `RELAY_JOBS_AUTO_WATCH_TAIL_LINES=<int>` (default `50`)
+- `RELAY_JOBS_THEN_TASK_DEFAULT_RUN_TASKS=true|false` (default `false`; used when `watch.thenTask` is set and `watch.runTasks` is omitted)
 - `RELAY_EXP_COMMANDS_ENABLED=true|false` (default `true`)
 - `RELAY_EXP_ALLOW_GUILDS=true|false` (default `true`)
 - `RELAY_EXP_DEFAULT_READY_TIMEOUT_SEC=<int>` (default `900`)
@@ -498,6 +500,9 @@ These `.env` variables control intermediate status edits in Discord:
 - `RELAY_PROGRESS_PERSISTENT_EVERY_MS=<int>` (default `45000`; min interval between persistent updates)
 - `RELAY_PROGRESS_PERSISTENT_ORCHESTRATOR_EVERY_MS=<int>` (default `15000`; min interval between durable orchestrator updates)
 - `RELAY_PROGRESS_PERSISTENT_MAX_PER_RUN=<int>` (default `6`)
+- `RELAY_PROGRESS_PERSISTENT_ADAPTIVE_ENABLED=true|false` (default `false`; scale persistent intervals up as runtime grows)
+- `RELAY_PROGRESS_PERSISTENT_ADAPTIVE_RAMP_EVERY_MS=<int>` (default `60000`; interval grows by one step each ramp window)
+- `RELAY_PROGRESS_PERSISTENT_ADAPTIVE_MAX_SCALE=<int>` (default `8`; cap for adaptive interval multiplier)
 - `RELAY_PROGRESS_PERSISTENT_SUPPRESS_SYSTEM_MILESTONES=true|false` (default `true`; hide system checkpoint milestones like queued/waiting/start/context to reduce interleaving with assistant replies)
 - `RELAY_PROGRESS_PERSISTENT_MODE=all|narrative|narrative+milestones|narrative+milestones+orchestrator|off` (default `all`; `narrative` suppresses low-signal command/tool trace lines; `narrative+milestones` also posts explicit relay checkpoint summaries; `narrative+milestones+orchestrator` additionally persists "Thinking: ..." style orchestration notes)
 - `RELAY_PROGRESS_PERSISTENT_MIN_CHARS=<int>` (default `32`; narrative mode drops very short notes)
@@ -512,6 +517,7 @@ Recommended for selective persistence in Discord threads:
 - set `RELAY_PROGRESS_PERSISTENT_ENABLED=true`
 - set `RELAY_PROGRESS_PERSISTENT_MODE=narrative+milestones+orchestrator`
 - tune `RELAY_PROGRESS_PERSISTENT_ORCHESTRATOR_EVERY_MS` (e.g., `15000` to `30000`)
+- optionally enable runtime scaling with `RELAY_PROGRESS_PERSISTENT_ADAPTIVE_ENABLED=true`
 - keep `RELAY_PROGRESS_SHOW_COMMANDS=true|false` based on your transient debug preference
 
 This keeps low-level `run/explore/command` traces in the transient edited status message while preserving a clean durable timeline of narrative updates plus explicit milestones (for example, `Milestone: context loaded`, `Milestone: run started`, `Milestone: ready to summarize`) and orchestrator commentary updates (for example, `Orchestrator: I'm checking runtime state next`).

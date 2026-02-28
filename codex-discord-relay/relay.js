@@ -539,6 +539,7 @@ const CONFIG = {
   })(),
   jobsAutoWatchEverySec: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_EVERY_SEC", 300)),
   jobsAutoWatchTailLines: Math.max(1, intEnv("RELAY_JOBS_AUTO_WATCH_TAIL_LINES", 30)),
+  jobsThenTaskDefaultRunTasks: boolEnv("RELAY_JOBS_THEN_TASK_DEFAULT_RUN_TASKS", false),
   expCommandsEnabled: boolEnv("RELAY_EXP_COMMANDS_ENABLED", true),
   expAllowGuilds: boolEnv("RELAY_EXP_ALLOW_GUILDS", true),
   expDefaultReadyTimeoutSec: Math.max(10, intEnv("RELAY_EXP_DEFAULT_READY_TIMEOUT_SEC", 900)),
@@ -565,6 +566,15 @@ const CONFIG = {
   progressPersistentOrchestratorEveryMs: Math.max(
     3000,
     intEnv("RELAY_PROGRESS_PERSISTENT_ORCHESTRATOR_EVERY_MS", 15000)
+  ),
+  progressPersistentAdaptiveEnabled: boolEnv("RELAY_PROGRESS_PERSISTENT_ADAPTIVE_ENABLED", false),
+  progressPersistentAdaptiveRampEveryMs: Math.max(
+    5000,
+    intEnv("RELAY_PROGRESS_PERSISTENT_ADAPTIVE_RAMP_EVERY_MS", 60000)
+  ),
+  progressPersistentAdaptiveMaxScale: Math.max(
+    1,
+    intEnv("RELAY_PROGRESS_PERSISTENT_ADAPTIVE_MAX_SCALE", 8)
   ),
   progressPersistentMinChars: Math.max(1, intEnv("RELAY_PROGRESS_PERSISTENT_MIN_CHARS", 32)),
   progressPersistentMaxChars: Math.max(120, intEnv("RELAY_PROGRESS_PERSISTENT_MAX_CHARS", 320)),
@@ -830,7 +840,7 @@ function normalizeRelayActionWatch(rawWatch) {
             const s = taskTextPreview(thenTaskDescriptionRaw, 200);
             return s || null;
           })(),
-    runTasks: Boolean(runTasksRaw),
+    runTasks: runTasksRaw == null ? null : Boolean(runTasksRaw),
     requireFiles: normalizedRequireFiles,
     readyTimeoutSec:
       readyTimeoutSec == null || !Number.isFinite(readyTimeoutSec)
@@ -858,7 +868,7 @@ function normalizeRelayActionWatch(rawWatch) {
     normalized.tailLines != null ||
     normalized.thenTask != null ||
     normalized.thenTaskDescription != null ||
-    normalized.runTasks ||
+    normalized.runTasks != null ||
     normalized.requireFiles.length > 0 ||
     normalized.readyTimeoutSec != null ||
     normalized.readyPollSec != null ||
@@ -2004,7 +2014,7 @@ function normalizeJobWatchObject(watch) {
     tailLines: Math.max(1, Math.min(500, Math.floor(Number(watch.tailLines || 30) || 30))),
     thenTask: watch.thenTask == null ? null : String(watch.thenTask || "").trim() || null,
     thenTaskDescription: watch.thenTaskDescription == null ? null : taskTextPreview(watch.thenTaskDescription, 200) || null,
-    runTasks: Boolean(watch.runTasks),
+    runTasks: watch.runTasks == null ? null : Boolean(watch.runTasks),
     requireFiles,
     readyTimeoutSec: Number.isFinite(readyTimeoutSec) ? Math.max(10, Math.min(86400, Math.floor(readyTimeoutSec))) : null,
     readyPollSec: Number.isFinite(readyPollSec) ? Math.max(1, Math.min(3600, Math.floor(readyPollSec))) : null,
@@ -2833,6 +2843,17 @@ function createProgressReporter(pendingMsg, conversationKey, { runId = null, run
   let lastPersistentText = "";
   let persistentChain = Promise.resolve();
 
+  const persistentIntervalMsFor = (isOrchestrator, nowMs) => {
+    const baseMs = isOrchestrator
+      ? CONFIG.progressPersistentOrchestratorEveryMs
+      : CONFIG.progressPersistentEveryMs;
+    if (!CONFIG.progressPersistentAdaptiveEnabled) return baseMs;
+    const elapsedMs = Math.max(0, nowMs - startedAt);
+    const step = Math.floor(elapsedMs / CONFIG.progressPersistentAdaptiveRampEveryMs);
+    const scale = Math.min(CONFIG.progressPersistentAdaptiveMaxScale, Math.max(1, 1 + step));
+    return Math.max(baseMs, baseMs * scale);
+  };
+
   const traceProgress = (text, synthetic) => {
     if (!CONFIG.progressTraceEnabled) return;
     if (synthetic && !CONFIG.progressTraceIncludeSynthetic) return;
@@ -2858,14 +2879,18 @@ function createProgressReporter(pendingMsg, conversationKey, { runId = null, run
       if (persistentSent >= CONFIG.progressPersistentMaxPerRun) return;
       if (cleaned === lastPersistentText) return;
       if (isOrchestrator) {
+        const intervalMs = persistentIntervalMsFor(true, now);
         if (
           lastPersistentOrchestratorAt > 0 &&
-          now - lastPersistentOrchestratorAt < CONFIG.progressPersistentOrchestratorEveryMs
+          now - lastPersistentOrchestratorAt < intervalMs
         ) {
           return;
         }
-      } else if (!isMilestone && lastPersistentAt > 0 && now - lastPersistentAt < CONFIG.progressPersistentEveryMs) {
-        return;
+      } else if (!isMilestone) {
+        const intervalMs = persistentIntervalMsFor(false, now);
+        if (lastPersistentAt > 0 && now - lastPersistentAt < intervalMs) {
+          return;
+        }
       }
     }
 
@@ -2877,14 +2902,18 @@ function createProgressReporter(pendingMsg, conversationKey, { runId = null, run
           if (persistentSent >= CONFIG.progressPersistentMaxPerRun) return;
           if (cleaned === lastPersistentText) return;
           if (isOrchestrator) {
+            const intervalMs = persistentIntervalMsFor(true, now2);
             if (
               lastPersistentOrchestratorAt > 0 &&
-              now2 - lastPersistentOrchestratorAt < CONFIG.progressPersistentOrchestratorEveryMs
+              now2 - lastPersistentOrchestratorAt < intervalMs
             ) {
               return;
             }
-          } else if (!isMilestone && lastPersistentAt > 0 && now2 - lastPersistentAt < CONFIG.progressPersistentEveryMs) {
-            return;
+          } else if (!isMilestone) {
+            const intervalMs = persistentIntervalMsFor(false, now2);
+            if (lastPersistentAt > 0 && now2 - lastPersistentAt < intervalMs) {
+              return;
+            }
           }
         }
         const elapsed = formatElapsed(now2 - startedAt);
@@ -3698,6 +3727,7 @@ function shouldPreferClaudeHeavyModel(userPrompt = "", runLabel = "") {
 }
 
 function selectClaudeModelForRun(userPrompt = "", runLabel = "") {
+  const promptText = `${String(userPrompt || "")}\n${String(runLabel || "")}`.toLowerCase();
   const lightModel = resolveClaudeModel("");
   const heavyModel = String(CONFIG.claudeModelHeavy || "").trim();
   if (!CONFIG.claudeModelRouting || !heavyModel) {
@@ -3708,6 +3738,34 @@ function selectClaudeModelForRun(userPrompt = "", runLabel = "") {
       strategy: "light-default",
     };
   }
+
+  const hasOpusKeyword = /\bopus\b/.test(promptText);
+  const hasSonnetKeyword = /\bsonnet\b/.test(promptText);
+  if (hasOpusKeyword && hasSonnetKeyword) {
+    return {
+      selectedModel: heavyModel,
+      fallbackModel: lightModel,
+      usedHeavy: true,
+      strategy: "keyword-opus",
+    };
+  }
+  if (hasOpusKeyword) {
+    return {
+      selectedModel: heavyModel,
+      fallbackModel: lightModel,
+      usedHeavy: true,
+      strategy: "keyword-opus",
+    };
+  }
+  if (hasSonnetKeyword) {
+    return {
+      selectedModel: lightModel,
+      fallbackModel: lightModel,
+      usedHeavy: false,
+      strategy: "keyword-sonnet",
+    };
+  }
+
   const useHeavy = shouldPreferClaudeHeavyModel(userPrompt, runLabel);
   return {
     selectedModel: useHeavy ? heavyModel : lightModel,
@@ -3782,6 +3840,9 @@ async function runClaude(session, prompt, extraEnv, onProgress, conversationKey,
   let threadId = session.threadId || null;
   let parsedResult = null;
   let lastAssistantEvent = null;
+  let lastAssistantText = "";
+  let assistantEventCount = 0;
+  let resultEventCount = 0;
   const toolMetaById = new Map();
   const rawStdoutLines = [];
   const nonJsonStdoutLines = [];
@@ -3811,8 +3872,16 @@ async function runClaude(session, prompt, extraEnv, onProgress, conversationKey,
       if (typeof evt.session_id === "string" && evt.session_id) {
         threadId = evt.session_id;
       }
-      if (evt.type === "assistant") lastAssistantEvent = evt;
-      if (evt.type === "result") parsedResult = evt;
+      if (evt.type === "assistant") {
+        assistantEventCount += 1;
+        lastAssistantEvent = evt;
+        const assistantText = extractClaudeTextFromJson(evt, "").trim();
+        if (assistantText) lastAssistantText = assistantText;
+      }
+      if (evt.type === "result") {
+        resultEventCount += 1;
+        parsedResult = evt;
+      }
 
       const summary = summarizeClaudeProgressEvent(evt, toolMetaById);
       if (summary) emitProgress(onProgress, summary);
@@ -3834,16 +3903,70 @@ async function runClaude(session, prompt, extraEnv, onProgress, conversationKey,
     }
 
     const parsed = parsedResult || lastAssistantEvent;
-    const assistantText = extractClaudeTextFromJson(lastAssistantEvent, "").trim();
+    const parsedText = extractClaudeTextFromJson(parsed, "").trim();
+    const assistantText = String(lastAssistantText || "").trim();
     const nonJsonStdout = nonJsonStdoutLines.join("\n").trim();
-    const fallbackText = assistantText
-      ? assistantText
-      : nonJsonStdout
-      ? nonJsonStdout
+
+    let resolvedText = "";
+    let resolutionSource = "";
+    if (parsedText && assistantText && parsedText !== assistantText) {
+      if (parsedText.length >= assistantText.length) {
+        resolvedText = parsedText;
+        resolutionSource = "parsed";
+      } else {
+        resolvedText = assistantText;
+        resolutionSource = "assistant_nonempty";
+      }
+      if (conversationKey) {
+        logRelayEvent("agent.run.claude_text_divergence", {
+          conversationKey,
+          sessionId: threadId || session.threadId || null,
+          parsedChars: parsedText.length,
+          assistantChars: assistantText.length,
+          selectedSource: resolutionSource,
+          model: selectedModel || null,
+        });
+      }
+    } else if (parsedText) {
+      resolvedText = parsedText;
+      resolutionSource = "parsed";
+    } else if (assistantText) {
+      resolvedText = assistantText;
+      resolutionSource = "assistant_nonempty";
+    } else if (nonJsonStdout) {
+      resolvedText = nonJsonStdout;
+      resolutionSource = "non_json_stdout";
+    }
+
+    const fallbackText = resolvedText
+      ? resolvedText
       : parsedEventCount > 0
       ? "Claude run finished without a final assistant text response."
       : stdoutTrimmed || "No message returned by Claude.";
-    const text = extractClaudeTextFromJson(parsed, fallbackText);
+    if (!resolvedText && parsedEventCount > 0 && conversationKey) {
+      logRelayEvent("agent.run.claude_text_missing", {
+        conversationKey,
+        sessionId: threadId || session.threadId || null,
+        parsedEventCount,
+        assistantEventCount,
+        resultEventCount,
+        nonJsonStdoutChars: nonJsonStdout.length,
+        model: selectedModel || null,
+      });
+    }
+    const text = resolvedText || fallbackText;
+    if (resolvedText && conversationKey) {
+      logRelayEvent("agent.run.claude_text_resolved", {
+        conversationKey,
+        sessionId: threadId || session.threadId || null,
+        source: resolutionSource || "unknown",
+        textChars: resolvedText.length,
+        parsedEventCount,
+        assistantEventCount,
+        resultEventCount,
+        model: selectedModel || null,
+      });
+    }
     return { threadId: threadId || session.threadId || null, text, model: selectedModel || null };
   } finally {
     try {
@@ -6603,7 +6726,10 @@ function normalizeJobWatchConfig(rawWatch, { everySecDefault, tailLinesDefault, 
     watch && watch.tailLines != null ? Number(watch.tailLines) : Number(tailLinesDefault != null ? tailLinesDefault : 30);
   const thenTask = watch && watch.thenTask != null ? String(watch.thenTask || "").trim() : "";
   const thenTaskDescription = watch && watch.thenTaskDescription != null ? String(watch.thenTaskDescription || "").trim() : "";
-  const runTasks = Boolean(watch && watch.runTasks);
+  const runTasks =
+    watch && watch.runTasks != null
+      ? Boolean(watch.runTasks)
+      : Boolean(thenTask && CONFIG.jobsThenTaskDefaultRunTasks);
   const rawRequireFiles = watch && Array.isArray(watch.requireFiles) ? watch.requireFiles : [];
   const requireFiles = [];
   for (const item of rawRequireFiles) {
@@ -6836,7 +6962,10 @@ async function finalizeWatchedJobExit({
   const watch = job.watch && typeof job.watch === "object" ? job.watch : null;
   const thenTask = watch && watch.thenTask ? String(watch.thenTask || "").trim() : "";
   const thenTaskDescription = watch && watch.thenTaskDescription ? String(watch.thenTaskDescription || "").trim() : "";
-  const runTasks = Boolean(watch && watch.runTasks);
+  const runTasks =
+    watch && watch.runTasks != null
+      ? Boolean(watch.runTasks)
+      : Boolean(thenTask && CONFIG.jobsThenTaskDefaultRunTasks);
 
   if (!job.exitedAt) {
     job.exitedAt = nowIso();
